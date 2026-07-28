@@ -1,0 +1,41 @@
+# Venvs (tự tạo lại qua setup, không commit)
+web_env/
+ui_env/
+vendor/pyvideotrans/.venv/
+vendor/video-subtitle-remover/videoEnv/
+
+# Model cache (tự tải lại qua setup, rất nặng)
+vendor/pyvideotrans/models/
+vendor/video-subtitle-remover/backend/models/
+vendor/video-subtitle-remover/weights/
+
+# Runtime scratch của 2 tool vendor (không phải source code)
+vendor/pyvideotrans/tmp/
+vendor/pyvideotrans/logs/
+vendor/pyvideotrans/_video_out/
+
+# Asset demo/doc/test của 2 repo gốc, không cần cho pipeline chạy thật
+vendor/video-subtitle-remover/design/
+vendor/video-subtitle-remover/test/
+vendor/video-subtitle-remover/backend/ffmpeg/linux_x64/
+vendor/pyvideotrans/videotrans/styles/simhei.ttf
+
+# Runtime output/uploads + thư mục test/debug lúc phát triển (không phải code sản phẩm)
+outputs/*.mp4
+outputs/_uploads/
+outputs/_work_*/
+samples/
+
+# Config cá nhân (mặc định do người dùng tự lưu qua UI/CLI)
+config.json
+
+# Python / OS junk
+__pycache__/
+*.pyc
+.DS_Store
+*.egg-info/
+
+# Build output
+build/
+dist/
+*.spec.bak

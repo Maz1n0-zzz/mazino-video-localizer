@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Video Localization Pipeline</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div class="evo-bg">
+  <div class="evo-moon"></div>
+  <div class="evo-dots evo-dots-1"></div>
+  <div class="evo-dots evo-dots-2"></div>
+  <div class="evo-dots evo-dots-3"></div>
+  <svg class="evo-lines" viewBox="0 0 220 220" preserveAspectRatio="none">
+    <line x1="10" y1="210" x2="210" y2="10" stroke="#38bdf8" stroke-width="1"/>
+    <line x1="50" y1="210" x2="210" y2="50" stroke="#38bdf8" stroke-width="1"/>
+    <line x1="90" y1="210" x2="210" y2="90" stroke="#38bdf8" stroke-width="1"/>
+  </svg>
+  <svg class="evo-mountains" viewBox="0 0 1600 260" preserveAspectRatio="none">
+    <polygon points="0,260 0,170 180,70 380,160 600,50 850,150 1080,70 1320,165 1600,90 1600,260" fill="#132a4f" opacity="0.55"/>
+    <polygon points="0,260 0,215 260,140 520,210 780,120 1040,205 1300,130 1600,195 1600,260" fill="#1b3a6b" opacity="0.5"/>
+  </svg>
+  <svg class="evo-leaf evo-leaf-1" viewBox="0 0 60 140"><path d="M30 4 C52 32 52 108 30 136 C8 108 8 32 30 4 Z" fill="none" stroke="#38bdf8" stroke-width="1"/><line x1="30" y1="10" x2="30" y2="130" stroke="#38bdf8" stroke-width="1"/></svg>
+  <svg class="evo-leaf evo-leaf-2" viewBox="0 0 60 140"><path d="M30 4 C52 32 52 108 30 136 C8 108 8 32 30 4 Z" fill="none" stroke="#38bdf8" stroke-width="1"/><line x1="30" y1="10" x2="30" y2="130" stroke="#38bdf8" stroke-width="1"/></svg>
+</div>
+
+<div class="page">
+  <div id="evo-header-row">
+    <div class="evo-header-badge" id="icon-video-header"></div>
+    <div>
+      <div class="evo-title">Video Localization Pipeline</div>
+      <div class="evo-subtitle">Xoá sub/logo cũ → transcribe → dịch → dub → ghép sub mới đúng vị trí.</div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="col">
+      <div class="card">
+        <div class="card-header"><span class="icon-badge" id="icon-video-1"></span><span class="card-title">Video gốc</span></div>
+        <div class="dropzone" id="dropzone">
+          <input type="file" id="file-input" accept="video/*" hidden>
+          <div id="dropzone-empty">
+            <span class="upload-icon" id="icon-upload"></span>
+            <p>Drop Video Here</p>
+            <p class="or">- or -</p>
+            <button type="button" class="pill-btn" id="upload-btn">Click to Upload</button>
+          </div>
+          <video id="preview-video" controls style="display:none"></video>
+          <button type="button" class="cancel-btn" id="cancel-video-btn" style="display:none" title="Bỏ chọn video">&times;</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><span class="icon-badge" id="icon-settings"></span><span class="card-title">Tuỳ chọn ngôn ngữ &amp; mô hình</span></div>
+
+        <div class="opt-row">
+          <div class="opt-label"><span class="ic" id="icon-globe-1"></span><span>Ngôn ngữ gốc</span></div>
+          <select id="source_lang" class="opt-pill"></select>
+        </div>
+        <div class="opt-row">
+          <div class="opt-label"><span class="ic" id="icon-globe-2"></span><span>Ngôn ngữ đích</span></div>
+          <select id="target_lang" class="opt-pill"></select>
+        </div>
+        <div class="opt-row">
+          <div class="opt-label"><span class="ic" id="icon-headphones"></span><span>Giọng đọc (Edge-TTS)</span></div>
+          <select id="voice_role" class="opt-pill"></select>
+        </div>
+        <div class="opt-row">
+          <div class="opt-label"><span class="ic" id="icon-gauge"></span><span>Whisper model (STT)</span></div>
+          <select id="model_name" class="opt-pill"></select>
+        </div>
+        <div class="opt-row">
+          <div class="opt-label"><span class="ic" id="icon-heart"></span><span>Chế độ xoá sub cũ (VSR)</span></div>
+          <select id="inpaint_mode" class="opt-pill"></select>
+        </div>
+      </div>
+
+      <button id="run-btn" class="run-btn"><span class="ic" id="icon-play"></span>Chạy pipeline</button>
+      <div class="save-default"><a href="#" id="save-default-link">Lưu làm mặc định</a></div>
+    </div>
+
+    <div class="col">
+      <div class="card">
+        <div class="card-header"><span class="icon-badge" id="icon-trend"></span><span class="card-title">Tiến trình</span></div>
+        <pre id="log-box" class="log-box">Chưa chạy — chọn video rồi bấm "Chạy pipeline".</pre>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><span class="icon-badge" id="icon-shield"></span><span class="card-title">Kết quả</span></div>
+        <div class="result-box" id="result-box">
+          <span class="ic-lg" id="icon-clapper"></span>
+          <p>Video kết quả sẽ hiển thị ở đây</p>
+        </div>
+        <video id="result-video" controls style="display:none"></video>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><span class="icon-badge" id="icon-download"></span><span class="card-title">Tải file kết quả</span></div>
+        <div class="dropzone" id="download-box">
+          <span class="upload-icon" id="icon-cloud"></span>
+          <p id="download-text">File sẽ sẵn sàng để tải xuống</p>
+          <a href="#" id="download-link" class="pill-btn" style="display:none">Tải xuống</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

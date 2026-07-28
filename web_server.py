@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Backend FastAPI cho UI custom (thay Gradio) — gọi lại orchestrator.py có sẵn.
+Chạy: source web_env/bin/activate && python3 web_server.py
+"""
+import asyncio
+import json
+import shutil
+import threading
+import time
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, UploadFile, Form, File
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+import orchestrator as orch
+from pipeline_config import load_config, save_config
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+OUTPUT_DIR = PROJECT_ROOT / "outputs"
+UPLOAD_DIR = OUTPUT_DIR / "_uploads"
+OUTPUT_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+app = FastAPI()
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+
+LANG_CHOICES = [
+    ("zh-cn", "Tiếng Trung (giản thể)"),
+    ("zh-tw", "Tiếng Trung (phồn thể)"),
+    ("en", "Tiếng Anh"),
+    ("vi", "Tiếng Việt"),
+    ("ja", "Tiếng Nhật"),
+    ("ko", "Tiếng Hàn"),
+    ("fr", "Tiếng Pháp"),
+    ("de", "Tiếng Đức"),
+    ("es", "Tiếng Tây Ban Nha"),
+    ("ru", "Tiếng Nga"),
+    ("th", "Tiếng Thái"),
+    ("it", "Tiếng Ý"),
+    ("pt", "Tiếng Bồ Đào Nha"),
+]
+MODEL_CHOICES = ["tiny", "base", "small", "medium", "large-v3"]
+INPAINT_CHOICES = ["sttn-auto", "sttn-det", "lama", "propainter", "opencv"]
+LOCALE_OVERRIDE = {"zh-cn": "zh-CN", "zh-tw": "zh-TW"}
+
+_ALL_VOICES = []
+_DEFAULT_VOICES = {
+    "vi": ["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"],
+    "en": ["en-US-GuyNeural", "en-US-JennyNeural"],
+    "zh-cn": ["zh-CN-XiaoxiaoNeural", "zh-CN-YunyangNeural"],
+}
+
+
+def _fetch_all_voices():
+    global _ALL_VOICES
+    try:
+        import edge_tts
+        _ALL_VOICES = asyncio.run(edge_tts.list_voices())
+    except Exception as e:
+        print(f"[warn] Không tải được danh sách voice lúc khởi động: {e}")
+        _ALL_VOICES = []
+
+
+_fetch_all_voices()
+
+
+def voices_for_lang(lang_code):
+    prefix = LOCALE_OVERRIDE.get(lang_code, lang_code).lower()
+    matched = [v["ShortName"] for v in _ALL_VOICES if v["Locale"].lower().startswith(prefix)]
+    return matched or _DEFAULT_VOICES.get(lang_code, [])
+
+
+def _log(job_id, msg):
+    with JOBS_LOCK:
+        JOBS[job_id]["logs"].append(msg)
+
+
+def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_role, inpaint_mode):
+    work_dir = OUTPUT_DIR / f"_work_{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        orch.preflight_checks()
+
+        _log(job_id, "[1/4] Đang xoá sub/logo cũ (video-subtitle-remover)...")
+        cleaned = orch.remove_old_subtitles(input_video, work_dir, inpaint_mode)
+        _log(job_id, "✓ Xong bước 1/4")
+
+        _log(job_id, "[2/4] Đang transcribe + dịch + dub (pyvideotrans)... "
+                      "(lần đầu chạy 1 model mới sẽ mất thêm thời gian tải model)")
+        dub_audio, dub_srt = orch.transcribe_translate_dub(
+            input_video, work_dir, source_lang, target_lang, model_name, voice_role,
+        )
+        _log(job_id, "✓ Xong bước 2/4")
+
+        _log(job_id, "[3/4] Đang tạo lại phụ đề đúng vị trí cho video này...")
+        width, height = orch.probe_resolution(cleaned)
+        ass_path = orch.build_fixed_ass(dub_srt, work_dir, width, height)
+        _log(job_id, "✓ Xong bước 3/4")
+
+        _log(job_id, "[4/4] Đang ghép video cuối cùng...")
+        output_path = OUTPUT_DIR / f"{job_id}_{target_lang}.mp4"
+        orch.compose_final(cleaned, dub_audio, ass_path, output_path)
+
+        with JOBS_LOCK:
+            JOBS[job_id]["status"] = "done"
+            JOBS[job_id]["result"] = output_path.name
+        _log(job_id, f"✓ Hoàn tất! File: {output_path.name}")
+    except orch.PipelineStageError as e:
+        with JOBS_LOCK:
+            JOBS[job_id]["status"] = "error"
+        _log(job_id, f"[LỖI ở bước: {e.stage}]\n{e.detail}")
+    except Exception as e:
+        with JOBS_LOCK:
+            JOBS[job_id]["status"] = "error"
+        _log(job_id, f"[LỖI không xác định] {e}")
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        try:
+            input_video.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+@app.get("/api/config")
+def get_config():
+    cfg = load_config()
+    return {
+        "config": cfg,
+        "lang_choices": LANG_CHOICES,
+        "model_choices": MODEL_CHOICES,
+        "inpaint_choices": INPAINT_CHOICES,
+        "voices": voices_for_lang(cfg["target_lang"]),
+    }
+
+
+@app.get("/api/voices")
+def get_voices(lang: str):
+    return {"voices": voices_for_lang(lang)}
+
+
+@app.post("/api/config")
+async def post_config(payload: dict):
+    merged = save_config(**payload)
+    return {"config": merged}
+
+
+@app.post("/api/run")
+async def run_pipeline(
+    video: UploadFile = File(...),
+    source_lang: str = Form(...),
+    target_lang: str = Form(...),
+    model_name: str = Form(...),
+    voice_role: str = Form(...),
+    inpaint_mode: str = Form(...),
+):
+    job_id = uuid.uuid4().hex[:12]
+    suffix = Path(video.filename or "input.mp4").suffix or ".mp4"
+    saved_path = UPLOAD_DIR / f"{job_id}{suffix}"
+    with saved_path.open("wb") as f:
+        shutil.copyfileobj(video.file, f)
+
+    JOBS[job_id] = {"logs": [], "status": "running", "result": None}
+    thread = threading.Thread(
+        target=_run_job,
+        args=(job_id, saved_path, source_lang, target_lang, model_name, voice_role, inpaint_mode),
+        daemon=True,
+    )
+    thread.start()
+    return {"job_id": job_id}
+
+
+@app.get("/api/progress/{job_id}")
+async def progress(job_id: str):
+    async def event_stream():
+        sent = 0
+        while True:
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+                if job is None:
+                    yield f"event: error\ndata: job không tồn tại\n\n"
+                    return
+                logs = list(job["logs"])
+                status = job["status"]
+                result = job["result"]
+            while sent < len(logs):
+                yield f"data: {json.dumps({'log': logs[sent]})}\n\n"
+                sent += 1
+            if status in ("done", "error"):
+                yield f"event: {status}\ndata: {json.dumps({'result': result})}\n\n"
+                return
+            await asyncio.sleep(0.4)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/outputs/{filename}")
+def get_output(filename: str):
+    path = OUTPUT_DIR / filename
+    if not path.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(path, media_type="video/mp4", filename=filename)
+
+
+app.mount("/", StaticFiles(directory=PROJECT_ROOT / "web_static", html=True), name="static")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=7860)
