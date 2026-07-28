@@ -16,7 +16,6 @@ def check_hw_on_start(_compat=None):
 
 
 def get_video_codec(compat=None) -> str:
-    import torch
     _codec_cache = app_cfg.codec_cache
     try:
         if not _codec_cache and Path(f'{ROOT_DIR}/videotrans/codec.json').exists():
@@ -110,6 +109,7 @@ def get_video_codec(compat=None) -> str:
             for encoder_suffix in encoders_to_test:
                 if encoder_suffix == 'nvenc':
                     try:
+                        import torch
                         if not torch.cuda.is_available():
                             logger.debug("CUDA 不可用，跳过 nvenc 测试。")
                             continue

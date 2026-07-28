@@ -17,7 +17,10 @@ from fastapi.staticfiles import StaticFiles
 import orchestrator as orch
 from pipeline_config import load_config, save_config
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+# Dùng lại PROJECT_ROOT của orchestrator (đã tự xử lý FROZEN vs dev-mode) thay
+# vì tự tính Path(__file__).resolve().parent — trong bundle PyInstaller,
+# __file__ của script chính không đảm bảo trỏ đúng thư mục cài đặt thật.
+PROJECT_ROOT = orch.PROJECT_ROOT
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 UPLOAD_DIR = OUTPUT_DIR / "_uploads"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -208,4 +211,12 @@ app.mount("/", StaticFiles(directory=PROJECT_ROOT / "web_static", html=True), na
 
 if __name__ == "__main__":
     import uvicorn
+
+    if orch.FROZEN:
+        # Bản đóng gói chạy như 1 app double-click, không có terminal để đọc
+        # URL — tự mở browser cho người dùng.
+        import threading
+        import webbrowser
+        threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:7860")).start()
+
     uvicorn.run(app, host="127.0.0.1", port=7860)

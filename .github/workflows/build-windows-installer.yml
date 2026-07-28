@@ -1,0 +1,112 @@
+name: build-windows-installer
+
+# Build Windows offline installer (.exe) từ 3 bundle PyInstaller + ffmpeg +
+# model whisper medium, gộp bằng Inno Setup. Chạy trên windows-latest vì
+# PyInstaller không cross-compile được — build cho Windows PHẢI chạy trên
+# Windows. Chưa có máy Windows để test trực tiếp, nên workflow này là điểm
+# verify chính; nhiều khả năng cần vài lần sửa qua log CI trước khi ra
+# installer chạy được thật.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      # ---------- pyvideotrans (Python 3.10) ----------
+      - name: Setup pyvideotrans venv + deps
+        working-directory: vendor/pyvideotrans
+        shell: pwsh
+        run: |
+          uv venv --python 3.10 .venv
+          uv sync
+          .venv\Scripts\python.exe -m pip install pyinstaller
+
+      - name: Build pyvideotrans_cli.exe
+        shell: pwsh
+        run: |
+          vendor\pyvideotrans\.venv\Scripts\pyinstaller.exe installer\pyvideotrans_cli.spec `
+            --distpath dist_stage_raw --workpath build_tmp\pyvideotrans --noconfirm
+
+      # ---------- video-subtitle-remover (Python 3.12) ----------
+      - name: Setup VSR venv + deps
+        working-directory: vendor/video-subtitle-remover
+        shell: pwsh
+        run: |
+          uv venv --python 3.12 videoEnv
+          uv pip install --python videoEnv\Scripts\python.exe paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+          uv pip install --python videoEnv\Scripts\python.exe torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --python videoEnv\Scripts\python.exe -r requirements.txt
+          uv pip install --python videoEnv\Scripts\python.exe pyinstaller
+
+      - name: Build vsr_cli.exe
+        shell: pwsh
+        run: |
+          vendor\video-subtitle-remover\videoEnv\Scripts\pyinstaller.exe installer\vsr_cli.spec `
+            --distpath dist_stage_raw --workpath build_tmp\vsr --noconfirm
+
+      # ---------- web_server (Python 3.12) ----------
+      - name: Setup web_env + deps
+        shell: pwsh
+        run: |
+          uv venv --python 3.12 web_env
+          uv pip install --python web_env\Scripts\python.exe fastapi "uvicorn[standard]" python-multipart edge-tts pyinstaller huggingface_hub
+
+      - name: Build web_server.exe
+        shell: pwsh
+        run: |
+          web_env\Scripts\pyinstaller.exe installer\web_server.spec `
+            --distpath dist_stage_raw --workpath build_tmp\web_server --noconfirm
+
+      # ---------- assemble staging layout cho Inno Setup ----------
+      - name: Assemble staging directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist_stage\web_server, dist_stage\pyvideotrans, dist_stage\vsr, dist_stage\ffmpeg, dist_stage\pvt_models | Out-Null
+          Copy-Item dist_stage_raw\web_server\* dist_stage\web_server -Recurse -Force
+          Copy-Item dist_stage_raw\pyvideotrans_cli\* dist_stage\pyvideotrans -Recurse -Force
+          Copy-Item dist_stage_raw\vsr_cli\* dist_stage\vsr -Recurse -Force
+          # Bắt buộc pyvideotrans chạy offline (không tự thử tải model qua mạng
+          # nếu bundle thiếu model — xem videotrans/configure/_paths.py, IF
+          # netoffline.txt tồn tại -> set HF_HUB_OFFLINE=1). Model đã được bundle
+          # sẵn ở bước dưới nên offline vẫn chạy được.
+          New-Item -ItemType File -Path dist_stage\pyvideotrans\netoffline.txt -Force | Out-Null
+
+      # ---------- ffmpeg tĩnh dùng chung cho orchestrator.py (cần libass để burn sub) ----------
+      - name: Download shared ffmpeg (static, libass build)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_extract
+          $bin = Get-ChildItem -Path ffmpeg_extract -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          Copy-Item $bin.FullName dist_stage\ffmpeg\ffmpeg.exe
+          $probe = Get-ChildItem -Path ffmpeg_extract -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
+          Copy-Item $probe.FullName dist_stage\ffmpeg\ffprobe.exe
+
+      # ---------- tải sẵn model whisper "medium" (offline bundling) ----------
+      - name: Pre-download faster-whisper medium model
+        shell: pwsh
+        env:
+          HF_HUB_CACHE: ${{ github.workspace }}\dist_stage\pvt_models
+        run: |
+          web_env\Scripts\python.exe -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Systran/faster-whisper-medium')"
+
+      # ---------- gộp thành setup.exe bằng Inno Setup ----------
+      - name: Compile installer with Inno Setup
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
+        with:
+          path: installer/setup.iss
+          options: /DStageDir="${{ github.workspace }}\dist_stage"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MazinoVideoLocalizer-Setup
+          path: dist_installer/*.exe
+          retention-days: 14

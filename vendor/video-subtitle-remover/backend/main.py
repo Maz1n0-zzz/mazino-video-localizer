@@ -471,6 +471,18 @@ class SubtitleRemover:
 
 
 if __name__ == '__main__':
+    # PyInstaller frozen exe: sys.executable == chinh exe nay, nen khi
+    # multiprocessing (spawn) can khoi dong resource_tracker/forkserver helper
+    # process, no se re-exec nguyen exe voi "-c <code>" - va vi argparse cua ta
+    # cung dinh nghia -c/--subtitle-area-coords (4 args), 2 thu se dung do
+    # nhau gay "error: argument --subtitle-area-coords/-c: expected 4
+    # arguments" trong child process (phat hien qua build+run thuc te dang
+    # frozen; khong xay ra o dev-mode vi sys.executable la python interpreter
+    # thuc, "-c" duoc chinh interpreter xu ly truoc khi cham toi script cua ta).
+    # freeze_support() phai goi truoc khi tao bat ky multiprocessing primitive
+    # nao de PyInstaller runtime-hook (pyi_rth_multiprocessing) chan dung cac
+    # child helper process nay som, khong cho chung roi tham gia parse_args().
+    multiprocessing.freeze_support()
     multiprocessing.set_start_method("spawn")
     from backend.tools.args_handler import parse_args
     args = parse_args()

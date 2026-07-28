@@ -22,11 +22,39 @@ from pathlib import Path
 
 from pipeline_config import load_config, save_config
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-VSR_DIR = PROJECT_ROOT / "vendor" / "video-subtitle-remover"
-VSR_PY = VSR_DIR / "videoEnv" / "bin" / "python"
-PVT_DIR = PROJECT_ROOT / "vendor" / "pyvideotrans"
-PVT_PY = PVT_DIR / ".venv" / "bin" / "python3"
+# Frozen = đang chạy từ bundle PyInstaller (.exe Windows đóng gói sẵn model+ffmpeg).
+# Dev = đang chạy trực tiếp bằng Python từ source, gọi vào venv riêng của từng vendor.
+FROZEN = getattr(sys, "frozen", False)
+
+if FROZEN:
+    # Layout do Inno Setup dựng: <install_dir>/{web_server.exe, pyvideotrans/, vsr/, ffmpeg/}
+    INSTALL_ROOT = Path(sys.executable).resolve().parent
+    VSR_DIR = INSTALL_ROOT / "vsr"
+    PVT_DIR = INSTALL_ROOT / "pyvideotrans"
+    VSR_CMD_BASE = [str(VSR_DIR / "vsr_cli.exe")]
+    PVT_CMD_BASE = [str(PVT_DIR / "pyvideotrans_cli.exe")]
+    FFMPEG_BIN = str(INSTALL_ROOT / "ffmpeg" / "ffmpeg.exe")
+    FFPROBE_BIN = str(INSTALL_ROOT / "ffmpeg" / "ffprobe.exe")
+    PROJECT_ROOT = INSTALL_ROOT
+    # pyvideotrans tự thêm ffmpeg/ riêng của nó vào PATH nhưng fallback sang PATH hệ
+    # thống nếu rỗng — ta không copy ffmpeg vào đó, chỉ cần đưa ffmpeg chung vào PATH
+    # kế thừa cho subprocess con (vsr_cli.exe/pyvideotrans_cli.exe).
+    import os
+    os.environ["PATH"] = str(INSTALL_ROOT / "ffmpeg") + os.pathsep + os.environ.get("PATH", "")
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parent
+    VSR_DIR = PROJECT_ROOT / "vendor" / "video-subtitle-remover"
+    PVT_DIR = PROJECT_ROOT / "vendor" / "pyvideotrans"
+    if sys.platform == "win32":
+        VSR_PY = VSR_DIR / "videoEnv" / "Scripts" / "python.exe"
+        PVT_PY = PVT_DIR / ".venv" / "Scripts" / "python.exe"
+    else:
+        VSR_PY = VSR_DIR / "videoEnv" / "bin" / "python"
+        PVT_PY = PVT_DIR / ".venv" / "bin" / "python3"
+    VSR_CMD_BASE = [str(VSR_PY), "-m", "backend.main"]
+    PVT_CMD_BASE = [str(PVT_PY), "cli.py"]
+    FFMPEG_BIN = "ffmpeg"
+    FFPROBE_BIN = "ffprobe"
 
 
 class PipelineStageError(RuntimeError):
@@ -41,18 +69,26 @@ class PipelineStageError(RuntimeError):
 def preflight_checks():
     """Kiểm tra môi trường trước khi chạy, báo lỗi rõ ràng thay vì traceback khó hiểu."""
     problems = []
-    if shutil.which("ffmpeg") is None:
-        problems.append("Không tìm thấy `ffmpeg` trong PATH.")
-    if shutil.which("ffprobe") is None:
-        problems.append("Không tìm thấy `ffprobe` trong PATH.")
-    if not VSR_PY.exists():
-        problems.append(
-            f"Chưa setup venv cho video-subtitle-remover ({VSR_PY} không tồn tại) — xem Phase 0."
-        )
-    if not PVT_PY.exists():
-        problems.append(
-            f"Chưa setup venv cho pyvideotrans ({PVT_PY} không tồn tại) — xem Phase 0."
-        )
+    if FROZEN:
+        if shutil.which(FFMPEG_BIN) is None and not Path(FFMPEG_BIN).exists():
+            problems.append(f"Không tìm thấy ffmpeg đóng gói: {FFMPEG_BIN}")
+        if not Path(VSR_CMD_BASE[0]).exists():
+            problems.append(f"Không tìm thấy vsr_cli.exe: {VSR_CMD_BASE[0]}")
+        if not Path(PVT_CMD_BASE[0]).exists():
+            problems.append(f"Không tìm thấy pyvideotrans_cli.exe: {PVT_CMD_BASE[0]}")
+    else:
+        if shutil.which(FFMPEG_BIN) is None:
+            problems.append("Không tìm thấy `ffmpeg` trong PATH.")
+        if shutil.which(FFPROBE_BIN) is None:
+            problems.append("Không tìm thấy `ffprobe` trong PATH.")
+        if not Path(VSR_CMD_BASE[0]).exists():
+            problems.append(
+                f"Chưa setup venv cho video-subtitle-remover ({VSR_CMD_BASE[0]} không tồn tại) — xem Phase 0."
+            )
+        if not Path(PVT_CMD_BASE[0]).exists():
+            problems.append(
+                f"Chưa setup venv cho pyvideotrans ({PVT_CMD_BASE[0]} không tồn tại) — xem Phase 0."
+            )
     if problems:
         raise PipelineStageError(
             "Kiểm tra môi trường",
@@ -74,7 +110,7 @@ def run(cmd, cwd=None, stage=""):
 
 def probe_resolution(video_path):
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+        [FFPROBE_BIN, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height", "-of", "json", str(video_path)],
         check=True, capture_output=True, text=True,
     )
@@ -86,7 +122,7 @@ def remove_old_subtitles(input_video, work_dir, inpaint_mode="sttn-auto"):
     stage = "VSR xoá sub/logo cũ"
     cleaned = work_dir / "cleaned.mp4"
     run([
-        str(VSR_PY), "-m", "backend.main",
+        *VSR_CMD_BASE,
         "--input", str(input_video),
         "--output", str(cleaned),
         "--inpaint-mode", inpaint_mode,
@@ -102,7 +138,7 @@ def transcribe_translate_dub(input_video, work_dir, source_lang, target_lang,
     pvt_out = work_dir / "pvt_out"
     pvt_out.mkdir(exist_ok=True)
     run([
-        str(PVT_PY), "cli.py", "--task", "vtv",
+        *PVT_CMD_BASE, "--task", "vtv",
         "--name", str(input_video),
         "--recogn_type", "0",
         "--model_name", model_name,
@@ -132,7 +168,7 @@ def build_fixed_ass(srt_path, work_dir, width, height):
     """Convert srt->ass rồi patch PlayRes + font/margin cho đúng tỉ lệ video thật."""
     stage = "Tạo phụ đề mới đúng vị trí"
     ass_path = work_dir / "fixed.ass"
-    run(["ffmpeg", "-y", "-i", str(srt_path), str(ass_path)], stage=stage)
+    run([FFMPEG_BIN, "-y", "-i", str(srt_path), str(ass_path)], stage=stage)
 
     if not ass_path.exists():
         raise PipelineStageError(stage, f"ffmpeg không sinh ra file .ass: {ass_path}")
@@ -158,7 +194,7 @@ def compose_final(cleaned_video, dub_audio, ass_path, output_path):
     """Ghep: video da xoa sub cu (khong lay audio goc) + audio dub moi + sub moi dung vi tri."""
     stage = "Ghép video cuối"
     run([
-        "ffmpeg", "-y",
+        FFMPEG_BIN, "-y",
         "-i", str(cleaned_video),
         "-i", str(dub_audio),
         "-filter_complex", f"[0:v]subtitles=filename='{ass_path.name}'[vout]",
