@@ -61,8 +61,12 @@ EXCLUDES = [
 ]
 
 DATAS = [
-    (os.path.join(PVT_DIR, "videotrans", "cfg.json"), "videotrans"),
-    (os.path.join(PVT_DIR, "videotrans", "params.json"), "videotrans"),
+    # cfg.json/params.json KHÔNG bundle: bị .gitignore gốc của pyvideotrans
+    # loại khỏi git (chỉ tồn tại local sau khi tự chạy 1 lần), nhưng
+    # AppSettings/AppParams (videotrans/configure/_app_settings.py,
+    # _app_params.py) tự parse_init() tạo file với default nếu chưa tồn tại —
+    # phát hiện qua CI build thật (lỗi "Unable to find ... cfg.json" vì repo
+    # checkout sạch không có 2 file này).
     (os.path.join(PVT_DIR, "videotrans", "language"), "videotrans/language"),
     (os.path.join(PVT_DIR, "videotrans", "voicejson"), "videotrans/voicejson"),
     (os.path.join(PVT_DIR, "videotrans", "prompts"), "videotrans/prompts"),

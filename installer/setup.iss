@@ -27,7 +27,12 @@ AppId={{6F1B2E3A-6C2E-4B7B-9B0A-8C7B6C6F2E10}}
 AppName=Mazino Video Localizer
 AppVersion=1.0.0
 AppPublisher=Mazino
-DefaultDirName={autopf}\MazinoVideoLocalizer
+; KHÔNG dùng {autopf} (Program Files) — app tự viết cfg.json/params.json/
+; tmp/logs/models trực tiếp vào chính thư mục cài đặt lúc chạy (không tách
+; riêng thư mục "user data" như convention Windows thường), nên cần 1 nơi
+; user thường có quyền ghi không cần admin. {localappdata} khớp với
+; PrivilegesRequired=lowest (cài đặt per-user, không cần elevation).
+DefaultDirName={localappdata}\MazinoVideoLocalizer
 DefaultGroupName=Mazino Video Localizer
 DisableProgramGroupPage=yes
 OutputDir=..\dist_installer
