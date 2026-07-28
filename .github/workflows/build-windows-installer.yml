@@ -98,11 +98,22 @@ jobs:
           web_env\Scripts\python.exe -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Systran/faster-whisper-medium')"
 
       # ---------- gộp thành setup.exe bằng Inno Setup ----------
+      # KHÔNG dùng action Minionguyjpro/Inno-Setup-Action — bug thật trong
+      # wrapper Node.js của action đó (TypeError ERR_INVALID_ARG_TYPE khi
+      # process.exitCode nhận string) khi ISCC in ra quá nhiều dòng
+      # "Compressing: ..." (bundle vsr ~1.4GB, hàng chục nghìn file nhỏ của
+      # torch/PySide6) — phát hiện qua chạy CI thật lần trước. Cài Inno Setup
+      # qua Chocolatey và gọi ISCC.exe trực tiếp với /Q (quiet) để vừa tránh
+      # bug action, vừa tránh log khổng lồ.
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
       - name: Compile installer with Inno Setup
-        uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
-        with:
-          path: installer/setup.iss
-          options: /DStageDir="${{ github.workspace }}\dist_stage"
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /Q "installer\setup.iss" "/DStageDir=${{ github.workspace }}\dist_stage"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC.exe exited with code $LASTEXITCODE" }
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
