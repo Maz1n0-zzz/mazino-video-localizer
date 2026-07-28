@@ -79,10 +79,26 @@ jobs:
           New-Item -ItemType File -Path dist_stage\pyvideotrans\netoffline.txt -Force | Out-Null
 
       # ---------- ffmpeg tĩnh dùng chung cho orchestrator.py (cần libass để burn sub) ----------
+      # Dùng bản gắn version (n8.1) thay vì "master" — release "latest" của
+      # BtbN bị rebuild liên tục, asset "master" hay rơi vào lúc đang
+      # republish (404 "Not Found" thoáng qua, phát hiện qua chạy CI thật lần
+      # trước) còn asset theo version cụ thể ổn định hơn. Thêm retry cho
+      # chắc vì đây là dependency mạng ngoài, không tự kiểm soát được.
       - name: Download shared ffmpeg (static, libass build)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-n8.1-latest-win64-gpl-8.1.zip"
+          for ($i = 1; $i -le 5; $i++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+              break
+            } catch {
+              Write-Host "Download attempt $i failed: $_"
+              if ($i -eq 5) { throw }
+              Start-Sleep -Seconds (10 * $i)
+            }
+          }
           Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_extract
           $bin = Get-ChildItem -Path ffmpeg_extract -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
           Copy-Item $bin.FullName dist_stage\ffmpeg\ffmpeg.exe
