@@ -38,6 +38,14 @@ def is_video_or_image(filename):
     return file_extension in video_extensions or file_extension in image_extensions
 
 def merge_big_file_if_not_exists(dir, file, man_filename = None):
+    if not os.path.isdir(dir):
+        # Model khong duoc bundle (khong dung toi trong pipeline nay, vd
+        # big-lama/propainter khi inpaint-mode=sttn-auto) - bo qua thay vi
+        # crash FileNotFoundError. Phat hien qua chay thu thuc te tren
+        # Windows (thu muc models/big-lama hoan toan khong ton tai vi bi
+        # .gitignore, ModelConfig.__init__ lai goi merge cho ca 2 dir nay
+        # bat ke inpaint-mode nao duoc chon).
+        return
     if file not in os.listdir(dir):
         fs = Filesplit()
         if man_filename is not None:
