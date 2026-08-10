@@ -10,6 +10,9 @@ name: build-windows-installer
 on:
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -147,3 +150,22 @@ jobs:
           name: MazinoVideoLocalizer-Setup
           path: dist_installer/*.exe
           retention-days: 14
+
+      # ---------- publish lên GitHub Release (tải nhanh hơn Actions Artifact) ----------
+      # Actions Artifact dùng hạ tầng lưu trữ riêng của Actions, tốc độ tải
+      # file lớn (~4GB) rất chậm/không ổn định trong thực tế (phát hiện qua
+      # test thật: >2h cho 1 file dù đường truyền mạng không phải nguyên
+      # nhân). GitHub Releases dùng CDN riêng (Fastly), tải nhanh hơn nhiều
+      # và hỗ trợ resume. Ghi đè tag "latest" mỗi lần build để user luôn có
+      # 1 link cố định trỏ tới bản mới nhất.
+      - name: Publish installer to GitHub Release (faster download)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $exe = Get-ChildItem -Path dist_installer -Filter *.exe | Select-Object -First 1
+          gh release delete latest --yes --cleanup-tag --repo "${{ github.repository }}" 2>$null
+          gh release create latest $exe.FullName `
+            --repo "${{ github.repository }}" `
+            --title "Mazino Video Localizer (ban moi nhat)" `
+            --notes "Auto-build tu commit ${{ github.sha }}. Tai file .exe ben duoi - nhanh hon nhieu so voi Artifact cua Actions."
