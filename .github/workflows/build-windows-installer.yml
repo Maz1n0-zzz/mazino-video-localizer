@@ -41,7 +41,17 @@ jobs:
         run: |
           uv venv --python 3.12 videoEnv
           uv pip install --python videoEnv\Scripts\python.exe paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-          uv pip install --python videoEnv\Scripts\python.exe torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cpu
+          # torch 2.4.1 (KHÔNG phải 2.7.0 CPU-only như trước) + torch_directml
+          # - DirectML chạy qua DirectX 12 nên dùng được với MỌI GPU trên
+          # Windows (AMD/NVIDIA/Intel), không riêng 1 hãng như CUDA (NVIDIA-
+          # only) hay ROCm (AMD-only, không hỗ trợ Windows tốt).
+          # backend/tools/hardware_accelerator.py đã tự detect + fallback về
+          # CPU an toàn nếu không có torch_directml hoặc GPU không tương
+          # thích DX12 — chỉ cần cài đúng cặp version này (torch_directml
+          # 0.2.5.dev240914 yêu cầu chính xác torch 2.4.1, theo Dockerfile
+          # gốc của video-subtitle-remover).
+          uv pip install --python videoEnv\Scripts\python.exe torch==2.4.1 torchvision==0.19.1
+          uv pip install --python videoEnv\Scripts\python.exe torch_directml==0.2.5.dev240914
           uv pip install --python videoEnv\Scripts\python.exe -r requirements.txt
           uv pip install --python videoEnv\Scripts\python.exe pyinstaller
 

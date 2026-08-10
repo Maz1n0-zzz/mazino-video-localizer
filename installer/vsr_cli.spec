@@ -52,7 +52,7 @@ Ghi chú quan trọng (đã verify thực nghiệm build+run thật):
 """
 import os
 import sys
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 PROJECT_ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 VSR_DIR = os.path.join(PROJECT_ROOT, "vendor", "video-subtitle-remover")
@@ -106,6 +106,23 @@ if os.path.exists(_interface_dir):
 for _pkg in ("qfluentwidgets", "paddleocr", "paddlex"):
     DATAS += collect_data_files(_pkg)
 
+# torch_directml: chỉ có wheel cho Windows (không cài được trên macOS nên
+# không thể verify cục bộ) — hardware_accelerator.py chỉ check bằng
+# importlib.util.find_spec("torch_directml") (không phải statement import
+# tĩnh) nên PyInstaller không tự phát hiện qua static analysis thông thường
+# ở điểm đó — nhưng `device` property CÓ 1 câu `import torch_directml` lồng
+# trong hàm nên PyInstaller vẫn tự thấy được qua AST scan bình thường. Thêm
+# hidden-import + collect_dynamic_libs để chắc chắn không thiếu DLL riêng
+# của DirectML runtime (chưa verify được trên máy Windows thật, phòng hờ).
+# Guard bằng find_spec để spec này vẫn build được trên macOS (bỏ qua đoạn
+# này) lúc test các phần khác của bundle.
+import importlib.util as _ilu
+HIDDEN_IMPORTS = []
+BINARIES = []
+if _ilu.find_spec("torch_directml") is not None:
+    HIDDEN_IMPORTS.append("torch_directml")
+    BINARIES += collect_dynamic_libs("torch_directml")
+
 EXCLUDES = [
     # GUI/desktop app của VSR (gui.py) không liên quan tới luồng CLI - loại
     # các submodule PySide6 nặng không cần thiết cho backend/main.py. Giữ
@@ -130,9 +147,9 @@ EXCLUDES = [
 a = Analysis(
     [os.path.join(VSR_DIR, "backend", "main.py")],
     pathex=[VSR_DIR],
-    binaries=[],
+    binaries=BINARIES,
     datas=DATAS,
-    hiddenimports=[],
+    hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
