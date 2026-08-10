@@ -20,10 +20,19 @@ def getset_gpu(force_cpu=False) -> int:
     if platform.system() == 'Darwin':
         app_cfg.NVIDIA_GPU_NUMS = 0
         return 0
-        
-    import torch
-    # 无可用显卡
-    app_cfg.NVIDIA_GPU_NUMS = 0 if not torch.cuda.is_available() else torch.cuda.device_count()
+
+    try:
+        import torch
+        # 无可用显卡
+        app_cfg.NVIDIA_GPU_NUMS = 0 if not torch.cuda.is_available() else torch.cuda.device_count()
+    except (ImportError, AttributeError) as e:
+        # Ban CPU-only (khong bundle torch) - AttributeError xay ra khi torch
+        # bi PyInstaller --exclude-module nhung van con 1 stub rong trong
+        # bundle (phat hien qua chay thuc te tren Windows: "module 'torch'
+        # has no attribute 'cuda'"). Coi nhu khong co GPU trong ca 2 truong
+        # hop.
+        logger.debug(f'Khong tim thay torch/CUDA hop le, coi nhu khong co GPU: {e}')
+        app_cfg.NVIDIA_GPU_NUMS = 0
     logger.debug(f'可用 Nvidia 显卡数: {app_cfg.NVIDIA_GPU_NUMS}')
     return app_cfg.NVIDIA_GPU_NUMS
 
