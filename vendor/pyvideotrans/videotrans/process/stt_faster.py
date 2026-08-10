@@ -44,32 +44,35 @@ def faster_whisper(
         detect_language = 'tl'
 
     def _create_model(_compute_type):
-        try:
-            logger.debug(f'[faster_whisper]加载模型{model_name}: {is_cuda=},{_compute_type=}')
-            model = WhisperModel(
-                local_dir,
-                device="cuda" if is_cuda else 'cpu',
-                device_index=device_index if is_cuda else 0,
-                compute_type=_compute_type
-            )
-            return model
-        except Exception as e:
-            # 对数据类型问题引发的错误重试
-            # cuda下先尝试使用 float16
-            if is_cuda and _compute_type != 'float16':
-                logger.warning(f'faster-whisper CUDA下 加载模型失败，更改为 [float16] 类型后重试{e}')
-                return _create_model('float16')
+        # Danh sach cac compute_type se thu lan luot, khong lap lai gia tri
+        # da thu (fix RecursionError: logic cu quay lai int8 sau khi float32
+        # that bai, khien int8<->float32 lap vo han tren CPU khi load model
+        # that bai lien tuc - phat hien qua chay thuc te tren Windows).
+        candidates = [_compute_type]
+        if is_cuda:
+            candidates.append('float16')
+        else:
+            candidates.append('int8')
+        candidates.append('float32')
 
-
-            # 如果cpu并且非 int8,先尝试 int8
-            if not is_cuda and _compute_type != 'int8':
-                logger.warning(f'faster-whisper CPU下 加载模型失败，更改为 [int8] 类型后重试{e}')
-                return _create_model('int8')
-            # 保底 float32
-            if _compute_type != 'float32':
-                logger.warning(f'faster-whisper  加载模型失败，更改为 [float32] 类型后重试, {is_cuda=}')
-                return _create_model('float32')
-            raise
+        last_error = None
+        tried = set()
+        for _ct in candidates:
+            if _ct in tried:
+                continue
+            tried.add(_ct)
+            try:
+                logger.debug(f'[faster_whisper]加载模型{model_name}: {is_cuda=},{_ct=}')
+                return WhisperModel(
+                    local_dir,
+                    device="cuda" if is_cuda else 'cpu',
+                    device_index=device_index if is_cuda else 0,
+                    compute_type=_ct
+                )
+            except Exception as e:
+                last_error = e
+                logger.warning(f'faster-whisper 加载模型失败[compute_type={_ct}], {is_cuda=}: {e}')
+        raise last_error
 
     try:
         if speech_timestamps and isinstance(speech_timestamps, str):
