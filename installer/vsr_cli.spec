@@ -85,9 +85,18 @@ if os.path.exists(_sttn_auto_model):
 # merge_big_file_if_not_exists cho cả 2 dir này bất kể mode -> phải có mặt
 # bản đã merge sẵn để hàm merge tự bỏ qua (file đã tồn tại), tránh crash/
 # tránh phải bundle thêm các file part.
-_big_lama = os.path.join(VSR_DIR, "backend", "models", "big-lama", "big-lama.pt")
-if os.path.exists(_big_lama):
-    DATAS.append((_big_lama, "backend/models/big-lama"))
+# big-lama.pt (205MB) vuot gioi han 100MB/file cua GitHub -> KHONG commit ban
+# merged truc tiep. Thay vao do bundle cac part 50MB (big-lama_1..5.pt) +
+# fs_manifest.csv (giong cach repo VSR goc lam); ModelConfig.__init__ goi
+# merge_big_file_if_not_exists -> Filesplit tu ghep thanh big-lama.pt ngay
+# trong thu muc cai (writable vi cai vao {localappdata}) o lan chay dau.
+_big_lama_dir = os.path.join(VSR_DIR, "backend", "models", "big-lama")
+if os.path.isdir(_big_lama_dir):
+    for _f in ("big-lama_1.pt", "big-lama_2.pt", "big-lama_3.pt",
+               "big-lama_4.pt", "big-lama_5.pt", "fs_manifest.csv"):
+        _p = os.path.join(_big_lama_dir, _f)
+        if os.path.exists(_p):
+            DATAS.append((_p, "backend/models/big-lama"))
 
 _propainter = os.path.join(VSR_DIR, "backend", "models", "propainter", "ProPainter.pth")
 if os.path.exists(_propainter):

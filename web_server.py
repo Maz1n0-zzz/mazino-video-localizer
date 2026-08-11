@@ -46,7 +46,15 @@ LANG_CHOICES = [
     ("pt", "Tiếng Bồ Đào Nha"),
 ]
 MODEL_CHOICES = ["tiny", "base", "small", "medium", "large-v3"]
-INPAINT_CHOICES = ["sttn-auto", "sttn-det", "lama", "propainter", "opencv"]
+# Chỉ liệt kê các mode thực sự chạy được với bộ model đã đóng gói. sttn-det/
+# lama/propainter/opencv (gốc) đều cần model OCR (PP-OCRv5) để tự dò vùng —
+# KHÔNG được bundle nên sẽ lỗi; bỏ khỏi UI. 3 mode dưới đây áp thẳng vào vùng
+# người dùng khoanh, không cần OCR:
+INPAINT_CHOICES = [
+    ("lama-auto", "Xoá bằng AI (LaMa) — xoá hẳn logo/sub cố định, có thể hơi nhoè"),
+    ("blur", "Làm mờ vùng — nhanh & ổn định, che chỗ logo/sub cũ"),
+    ("sttn-auto", "STTN — chỉ hợp phụ đề chạy chữ, KHÔNG xoá được logo cố định"),
+]
 LOCALE_OVERRIDE = {"zh-cn": "zh-CN", "zh-tw": "zh-TW"}
 
 _ALL_VOICES = []

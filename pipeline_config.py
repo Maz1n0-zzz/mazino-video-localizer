@@ -9,7 +9,9 @@ DEFAULTS = {
     "target_lang": "vi",
     "model_name": "medium",
     "voice_role": "vi-VN-HoaiMyNeural",
-    "inpaint_mode": "sttn-auto",
+    # lama-auto: xoá logo/sub CỐ ĐỊNH bằng AI (đúng nhu cầu re-up TikTok). sttn-auto
+    # cũ KHÔNG xoá được logo cố định — xem web_server.INPAINT_CHOICES.
+    "inpaint_mode": "lama-auto",
     # Khoảng cách phụ đề mới tới đáy video (% chiều cao) — vùng an toàn TikTok.
     "subtitle_bottom_pct": 15,
 }

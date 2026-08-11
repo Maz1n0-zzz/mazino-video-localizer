@@ -10,6 +10,12 @@ class InpaintMode(Enum):
     LAMA = "lama"
     PROPAINTER = "propainter"
     OPENCV = "opencv"
+    # 2 mode tuy chinh cho pipeline nay: ap THANG vao vung nguoi dung khoanh
+    # (self.sub_areas), KHONG chay OCR detect (giong sttn-auto) - dung cho
+    # logo/sub CO DINH suot video ma STTN khong xoa duoc (STTN muon frame khac
+    # de tham chieu, logo co dinh thi frame nao cung co -> tai tao lai y nguyen).
+    LAMA_AUTO = "lama-auto"   # inpaint AI tung frame doc lap (xoa han, co the nhoe)
+    BLUR = "blur"             # lam mo vung (che, dang tin cay, khong can model)
 
 @unique
 class SubtitleDetectMode(Enum):

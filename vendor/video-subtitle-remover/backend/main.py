@@ -257,6 +257,49 @@ class SubtitleRemover:
         sttn_video_inpaint = STTNAutoInpaint(self.hardware_accelerator.device, self.model_config.STTN_AUTO_MODEL_PATH, self.video_path)
         sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar)
 
+    def _region_mask(self):
+        """Tao mask tu self.sub_areas (vung nguoi dung khoanh) - dung chung cho
+        lama-auto / blur, giong cach sttn_auto_mode dung, KHONG chay OCR."""
+        mask_area_coordinates = []
+        for sub_area in self.sub_areas:
+            ymin, ymax, xmin, xmax = sub_area
+            mask_area_coordinates.append((xmin, xmax, ymin, ymax))
+        return create_mask(self.mask_size, mask_area_coordinates)
+
+    def _region_direct_mode(self, tbar, fill_fn):
+        """Ap fill_fn(frame, mask) len TUNG frame trong vung sub_areas, khong OCR,
+        khong tham chieu frame khac -> xoa duoc ca logo/sub CO DINH.
+        fill_fn: ham nhan (frame_bgr, mask_uint8_HxW) tra ve frame da xu ly."""
+        self.append_output(tr['Main']['ProcessingStartRemovingSubtitles'])
+        mask = self._region_mask()
+        reader = FramePrefetcher(self.video_cap)
+        while True:
+            ret, frame = reader.read()
+            if not ret:
+                break
+            out = fill_fn(frame, mask)
+            self.video_writer.write(out)
+            self.update_progress(tbar, increment=1)
+        reader.stop()
+
+    def lama_auto_mode(self, tbar):
+        """Inpaint LaMa tung frame doc lap tren vung khoanh (xoa han logo/sub co dinh)."""
+        self._region_direct_mode(tbar, lambda frame, mask: self.lama_inpaint.inpaint(frame, mask))
+
+    def blur_mode(self, tbar):
+        """Lam mo (Gaussian) vung khoanh - nhanh, dang tin cay, khong can model."""
+        # Kernel mo ti le theo be ngang video de tuong doi giong nhau moi do phan giai.
+        k = max(21, (int(self.frame_width * 0.05) // 2) * 2 + 1)  # so le
+
+        def _blur(frame, mask):
+            blurred = cv2.GaussianBlur(frame, (k, k), 0)
+            m = mask.astype(bool)
+            out = frame.copy()
+            out[m] = blurred[m]
+            return out
+
+        self._region_direct_mode(tbar, _blur)
+
     def video_inpaint(self, tbar, model):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
@@ -376,6 +419,10 @@ class SubtitleRemover:
                 self.propainter_mode(tbar)
             elif config.inpaintMode.value == InpaintMode.STTN_AUTO:
                 self.sttn_auto_mode(tbar)
+            elif config.inpaintMode.value == InpaintMode.LAMA_AUTO:
+                self.lama_auto_mode(tbar)
+            elif config.inpaintMode.value == InpaintMode.BLUR:
+                self.blur_mode(tbar)
             elif config.inpaintMode.value == InpaintMode.STTN_DET:
                 self.video_inpaint(tbar, self.sttn_det_inpaint)
             elif config.inpaintMode.value == InpaintMode.LAMA:
@@ -401,7 +448,12 @@ class SubtitleRemover:
                 pass #ignore
 
     def log_model(self):
-        model_friendly_name = list(tr['InpaintMode'].values())[list(InpaintMode).index(config.inpaintMode.value)]
+        # tr['InpaintMode'] (file interface .ini) chi co ten cho cac mode goc;
+        # LAMA_AUTO/BLUR la mode tuy chinh them vao -> index se vuot ban dich,
+        # fallback ve chinh gia tri enum de tranh IndexError.
+        _mode_names = list(tr['InpaintMode'].values())
+        _mode_idx = list(InpaintMode).index(config.inpaintMode.value)
+        model_friendly_name = _mode_names[_mode_idx] if _mode_idx < len(_mode_names) else config.inpaintMode.value
         model_device = 'CPU'
         if config.inpaintMode.value != InpaintMode.OPENCV and self.hardware_accelerator.has_accelerator():
             accelerator_name = self.hardware_accelerator.accelerator_name
