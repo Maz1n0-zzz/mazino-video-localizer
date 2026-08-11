@@ -12,6 +12,7 @@ const ICONS = {
   upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
   cloud: '<path d="M8 17l4 4 4-4"/><path d="M12 12v9"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/>',
   clapper: '<path d="M20 6H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2z"/><path d="M2 8l3-4h3l-3 4M8 8l3-4h3l-3 4M14 8l3-4h3l-3 4"/>',
+  caption: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 12h4M7 15h2M14 12h3M14 15h3"/>',
 };
 
 function svg(name, vb = "0 0 24 24") {
@@ -37,6 +38,7 @@ setIcon("icon-play", "play");
 setIcon("icon-upload", "upload");
 setIcon("icon-cloud", "cloud");
 setIcon("icon-clapper", "clapper");
+setIcon("icon-caption", "caption");
 
 const els = {
   sourceLang: document.getElementById("source_lang"),
@@ -58,10 +60,26 @@ const els = {
   downloadLink: document.getElementById("download-link"),
   saveDefaultLink: document.getElementById("save-default-link"),
   cancelVideoBtn: document.getElementById("cancel-video-btn"),
+  subtitleBottomPct: document.getElementById("subtitle_bottom_pct"),
+  regionPanel: document.getElementById("region-panel"),
+  regionStartBtn: document.getElementById("region-start-btn"),
+  regionCount: document.getElementById("region-count"),
+  regionEditor: document.getElementById("region-editor"),
+  regionCanvas: document.getElementById("region-canvas"),
+  regionUndoBtn: document.getElementById("region-undo-btn"),
+  regionClearBtn: document.getElementById("region-clear-btn"),
+  regionDoneBtn: document.getElementById("region-done-btn"),
 };
 
 let selectedFile = null;
 let cfgCache = null;
+
+// ---- Khoanh vùng xoá sub/logo (toạ độ theo PIXEL GỐC của video) ----
+let subAreas = [];       // [{xmin,ymin,xmax,ymax}]
+let regionFrame = null;  // canvas offscreen giữ frame đã chụp để vẽ lại
+let drawing = false;
+let dragStart = null;
+let dragCur = null;
 
 function fillSelect(select, options, value) {
   select.innerHTML = "";
@@ -84,6 +102,7 @@ async function loadConfig() {
   fillSelect(els.modelName, data.model_choices, data.config.model_name);
   fillSelect(els.inpaintMode, data.inpaint_choices, data.config.inpaint_mode);
   fillSelect(els.voiceRole, data.voices, data.config.voice_role);
+  els.subtitleBottomPct.value = data.subtitle_bottom_pct ?? data.config.subtitle_bottom_pct ?? 15;
 }
 loadConfig();
 
@@ -99,6 +118,11 @@ function showPreview(file) {
   els.previewVideo.style.display = "block";
   els.previewVideo.src = URL.createObjectURL(file);
   els.cancelVideoBtn.style.display = "flex";
+  // reset vùng đã chọn cho video mới
+  resetRegions();
+  els.regionPanel.style.display = "block";
+  els.regionEditor.style.display = "none";
+  els.regionStartBtn.style.display = "inline-block";
 }
 
 function clearPreview() {
@@ -111,7 +135,111 @@ function clearPreview() {
   els.previewVideo.style.display = "none";
   els.cancelVideoBtn.style.display = "none";
   els.dropzoneEmpty.style.display = "block";
+  els.regionPanel.style.display = "none";
+  els.regionEditor.style.display = "none";
+  resetRegions();
 }
+
+// ---------- Region editor ----------
+function resetRegions() {
+  subAreas = [];
+  drawing = false;
+  dragStart = dragCur = null;
+  regionFrame = null;
+  updateRegionCount();
+}
+
+function updateRegionCount() {
+  const n = subAreas.length;
+  els.regionCount.textContent = n
+    ? `Đã chọn ${n} vùng — sẽ xoá các vùng này`
+    : "Chưa chọn vùng — sẽ bỏ qua bước xoá sub/logo";
+}
+
+function canvasPt(e) {
+  const rect = els.regionCanvas.getBoundingClientRect();
+  const sx = els.regionCanvas.width / rect.width;
+  const sy = els.regionCanvas.height / rect.height;
+  let x = (e.clientX - rect.left) * sx;
+  let y = (e.clientY - rect.top) * sy;
+  x = Math.max(0, Math.min(x, els.regionCanvas.width));
+  y = Math.max(0, Math.min(y, els.regionCanvas.height));
+  return { x, y };
+}
+
+function redrawRegions(preview) {
+  if (!regionFrame) return;
+  const cv = els.regionCanvas;
+  const ctx = cv.getContext("2d");
+  ctx.drawImage(regionFrame, 0, 0);
+  const lw = Math.max(2, Math.round(cv.width * 0.004));
+  const drawBox = (b, stroke, fill) => {
+    const x = Math.min(b.xmin, b.xmax), y = Math.min(b.ymin, b.ymax);
+    const w = Math.abs(b.xmax - b.xmin), h = Math.abs(b.ymax - b.ymin);
+    ctx.fillStyle = fill; ctx.fillRect(x, y, w, h);
+    ctx.lineWidth = lw; ctx.strokeStyle = stroke; ctx.strokeRect(x, y, w, h);
+  };
+  subAreas.forEach((b) => drawBox(b, "#38bdf8", "rgba(56,189,248,0.22)"));
+  if (preview) drawBox(preview, "#f59e0b", "rgba(245,158,11,0.22)");
+}
+
+function enterRegionMode() {
+  const v = els.previewVideo;
+  if (!v.videoWidth || !v.videoHeight || v.readyState < 2) {
+    appendLog("Video chưa nạp xong khung hình — đợi 1-2 giây rồi bấm lại.");
+    return;
+  }
+  const cw = v.videoWidth, ch = v.videoHeight;
+  regionFrame = document.createElement("canvas");
+  regionFrame.width = cw; regionFrame.height = ch;
+  regionFrame.getContext("2d").drawImage(v, 0, 0, cw, ch);
+  els.regionCanvas.width = cw;
+  els.regionCanvas.height = ch;
+  redrawRegions();
+  els.regionEditor.style.display = "block";
+  els.regionStartBtn.style.display = "none";
+  els.previewVideo.style.display = "none";
+}
+
+function exitRegionMode() {
+  els.regionEditor.style.display = "none";
+  els.previewVideo.style.display = "block";
+  els.regionStartBtn.style.display = "inline-block";
+  els.regionStartBtn.textContent = subAreas.length
+    ? `✏️ Sửa vùng xoá (${subAreas.length})`
+    : "✏️ Khoanh vùng xoá sub/logo cũ";
+}
+
+els.regionStartBtn.addEventListener("click", enterRegionMode);
+els.regionDoneBtn.addEventListener("click", exitRegionMode);
+els.regionUndoBtn.addEventListener("click", () => { subAreas.pop(); redrawRegions(); updateRegionCount(); });
+els.regionClearBtn.addEventListener("click", () => { subAreas = []; redrawRegions(); updateRegionCount(); });
+
+els.regionCanvas.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  drawing = true;
+  try { els.regionCanvas.setPointerCapture(e.pointerId); } catch (_) {}
+  dragStart = dragCur = canvasPt(e);
+});
+els.regionCanvas.addEventListener("pointermove", (e) => {
+  if (!drawing) return;
+  dragCur = canvasPt(e);
+  redrawRegions({ xmin: dragStart.x, ymin: dragStart.y, xmax: dragCur.x, ymax: dragCur.y });
+});
+els.regionCanvas.addEventListener("pointerup", () => {
+  if (!drawing) return;
+  drawing = false;
+  const b = {
+    xmin: Math.round(Math.min(dragStart.x, dragCur.x)),
+    ymin: Math.round(Math.min(dragStart.y, dragCur.y)),
+    xmax: Math.round(Math.max(dragStart.x, dragCur.x)),
+    ymax: Math.round(Math.max(dragStart.y, dragCur.y)),
+  };
+  if (b.xmax - b.xmin >= 4 && b.ymax - b.ymin >= 4) subAreas.push(b);
+  dragStart = dragCur = null;
+  redrawRegions();
+  updateRegionCount();
+});
 
 els.uploadBtn.addEventListener("click", () => els.fileInput.click());
 els.fileInput.addEventListener("change", () => {
@@ -157,6 +285,14 @@ els.runBtn.addEventListener("click", async () => {
   form.append("model_name", els.modelName.value);
   form.append("voice_role", els.voiceRole.value);
   form.append("inpaint_mode", els.inpaintMode.value);
+  form.append("subtitle_bottom_pct", els.subtitleBottomPct.value || "15");
+  // VSR nhận theo thứ tự ymin,ymax,xmin,xmax
+  form.append("sub_areas", JSON.stringify(subAreas.map((b) => ({
+    ymin: b.ymin, ymax: b.ymax, xmin: b.xmin, xmax: b.xmax,
+  }))));
+  if (!subAreas.length) {
+    appendLog("(Chưa khoanh vùng xoá sub/logo — bước xoá sẽ được bỏ qua, giữ nguyên video gốc.)");
+  }
 
   try {
     const res = await fetch("/api/run", { method: "POST", body: form });
@@ -198,11 +334,12 @@ els.saveDefaultLink.addEventListener("click", async (e) => {
     model_name: els.modelName.value,
     voice_role: els.voiceRole.value,
     inpaint_mode: els.inpaintMode.value,
+    subtitle_bottom_pct: parseInt(els.subtitleBottomPct.value || "15", 10),
   };
   await fetch("/api/config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  appendLog(`✓ Đã lưu làm mặc định: ${payload.source_lang} → ${payload.target_lang}, model=${payload.model_name}, voice=${payload.voice_role}, inpaint=${payload.inpaint_mode}`);
+  appendLog(`✓ Đã lưu làm mặc định: ${payload.source_lang} → ${payload.target_lang}, model=${payload.model_name}, voice=${payload.voice_role}, inpaint=${payload.inpaint_mode}, sub cách đáy=${payload.subtitle_bottom_pct}%`);
 });

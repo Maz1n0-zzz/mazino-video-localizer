@@ -118,15 +118,33 @@ def probe_resolution(video_path):
     return info["width"], info["height"]
 
 
-def remove_old_subtitles(input_video, work_dir, inpaint_mode="sttn-auto"):
+def remove_old_subtitles(input_video, work_dir, inpaint_mode="sttn-auto", sub_areas=None):
+    """Xoá sub/logo cũ trong các VÙNG do người dùng khoanh (sub_areas).
+
+    sub_areas: list các tuple (ymin, ymax, xmin, xmax) theo pixel gốc của video.
+
+    Nếu sub_areas rỗng/None -> BỎ QUA hẳn bước này, trả về video gốc. Lý do:
+    mode sttn-auto KHÔNG tự dò tìm phụ đề (backend/main.py sttn_auto_mode ghi rõ
+    "không tiến hành detect phụ đề" - chỉ xoá đúng vùng toạ độ được truyền vào).
+    Nếu không truyền vùng, VSR mặc định lấy TOÀN khung hình rồi để STTN "vẽ lại"
+    cả khung bằng cách mượn frame kế bên -> với video gần tĩnh nó tái tạo y nguyên
+    (kể cả sub cũ) nên vô ích mà còn tốn cả giờ. Bỏ qua rõ ràng tốt hơn chạy 1
+    bước vô nghĩa.
+    """
     stage = "VSR xoá sub/logo cũ"
+    if not sub_areas:
+        return input_video
     cleaned = work_dir / "cleaned.mp4"
-    run([
+    cmd = [
         *VSR_CMD_BASE,
         "--input", str(input_video),
         "--output", str(cleaned),
         "--inpaint-mode", inpaint_mode,
-    ], cwd=VSR_DIR, stage=stage)
+    ]
+    for area in sub_areas:
+        ymin, ymax, xmin, xmax = area
+        cmd += ["--subtitle-area-coords", str(int(ymin)), str(int(ymax)), str(int(xmin)), str(int(xmax))]
+    run(cmd, cwd=VSR_DIR, stage=stage)
     if not cleaned.exists():
         raise PipelineStageError(stage, f"Không sinh ra file output mong đợi: {cleaned}")
     return cleaned
@@ -164,8 +182,13 @@ def transcribe_translate_dub(input_video, work_dir, source_lang, target_lang,
     return dub_audio, dub_srt
 
 
-def build_fixed_ass(srt_path, work_dir, width, height):
-    """Convert srt->ass rồi patch PlayRes + font/margin cho đúng tỉ lệ video thật."""
+def build_fixed_ass(srt_path, work_dir, width, height, bottom_pct=15):
+    """Convert srt->ass rồi patch PlayRes + font/margin cho đúng tỉ lệ video thật.
+
+    bottom_pct: khoảng cách từ đáy video lên tới phụ đề, tính theo % chiều cao.
+    Mặc định 15% (vùng an toàn TikTok — tránh bị caption/nút của TikTok che). Giá
+    trị cũ 5% khiến sub nằm quá sát đáy, dễ bị UI TikTok che (phản hồi thực tế).
+    """
     stage = "Tạo phụ đề mới đúng vị trí"
     ass_path = work_dir / "fixed.ass"
     run([FFMPEG_BIN, "-y", "-i", str(srt_path), str(ass_path)], stage=stage)
@@ -179,7 +202,7 @@ def build_fixed_ass(srt_path, work_dir, width, height):
 
     fontsize = max(16, round(height * 0.035))
     outline = max(1, round(height * 0.0025))
-    margin_v = round(height * 0.05)
+    margin_v = round(height * max(0, min(bottom_pct, 45)) / 100)
     margin_lr = round(width * 0.04)
     new_style = (
         f"Style: Default,Arial,{fontsize},&Hffffff,&Hffffff,&H0,&H80000000,"
@@ -218,6 +241,12 @@ def main():
     parser.add_argument("--model", default=cfg["model_name"], help="Whisper model (tiny/small/medium/large-v3)")
     parser.add_argument("--voice", default=cfg["voice_role"], help="Edge-TTS voice role")
     parser.add_argument("--inpaint-mode", default=cfg["inpaint_mode"], help="VSR inpaint mode")
+    parser.add_argument("--sub-area", action="append", nargs=4, type=int,
+                         metavar=("YMIN", "YMAX", "XMIN", "XMAX"),
+                         help="Vùng xoá sub/logo cũ (pixel gốc). Lặp lại nhiều lần cho nhiều vùng. "
+                              "Không truyền -> bỏ qua bước xoá sub.")
+    parser.add_argument("--subtitle-bottom-pct", type=int, default=int(cfg.get("subtitle_bottom_pct", 15)),
+                         help="Khoảng cách phụ đề mới tới đáy video, tính theo %% chiều cao (mặc định 15).")
     parser.add_argument("--output", default=None, help="File output cuối (mặc định: <input>_<target-lang>.mp4)")
     parser.add_argument("--keep-temp", action="store_true", help="Giữ lại thư mục tạm để debug")
     parser.add_argument("--save-as-default", action="store_true",
@@ -245,7 +274,7 @@ def main():
         preflight_checks()
 
         print("== Bước 1/4: VSR xoá sub/logo cũ ==")
-        cleaned_video = remove_old_subtitles(input_video, work_dir, args.inpaint_mode)
+        cleaned_video = remove_old_subtitles(input_video, work_dir, args.inpaint_mode, sub_areas=args.sub_area)
 
         print("== Bước 2/4: pyvideotrans transcribe + dịch + dub ==")
         dub_audio, dub_srt = transcribe_translate_dub(
@@ -255,7 +284,7 @@ def main():
 
         print("== Bước 3/4: tự tạo sub mới đúng vị trí (fix PlayRes bug) ==")
         width, height = probe_resolution(cleaned_video)
-        ass_path = build_fixed_ass(dub_srt, work_dir, width, height)
+        ass_path = build_fixed_ass(dub_srt, work_dir, width, height, bottom_pct=args.subtitle_bottom_pct)
 
         print("== Bước 4/4: ghép video sạch + audio dub + sub mới ==")
         compose_final(cleaned_video, dub_audio, ass_path, output_path)

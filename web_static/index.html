@@ -49,6 +49,24 @@
           <video id="preview-video" controls style="display:none"></video>
           <button type="button" class="cancel-btn" id="cancel-video-btn" style="display:none" title="Bỏ chọn video">&times;</button>
         </div>
+
+        <div id="region-panel" style="display:none">
+          <div class="region-bar">
+            <button type="button" class="pill-btn" id="region-start-btn">✏️ Khoanh vùng xoá sub/logo cũ</button>
+            <span id="region-count" class="region-count"></span>
+          </div>
+          <div id="region-editor" style="display:none">
+            <p class="region-hint">Tua video tới khung có sub/logo cần xoá, rồi <b>kéo chuột</b> để khoanh vùng. Khoanh được nhiều vùng (vd sub ở đáy + logo ở giữa).</p>
+            <div class="region-canvas-wrap">
+              <canvas id="region-canvas"></canvas>
+            </div>
+            <div class="region-bar">
+              <button type="button" class="pill-btn ghost" id="region-undo-btn">↩ Bỏ vùng cuối</button>
+              <button type="button" class="pill-btn ghost" id="region-clear-btn">Xoá hết</button>
+              <button type="button" class="pill-btn" id="region-done-btn">✓ Xong</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="card">
@@ -73,6 +91,10 @@
         <div class="opt-row">
           <div class="opt-label"><span class="ic" id="icon-heart"></span><span>Chế độ xoá sub cũ (VSR)</span></div>
           <select id="inpaint_mode" class="opt-pill"></select>
+        </div>
+        <div class="opt-row">
+          <div class="opt-label"><span class="ic" id="icon-caption"></span><span>Phụ đề cách đáy (%)</span></div>
+          <input type="number" id="subtitle_bottom_pct" class="opt-pill" min="0" max="45" step="1" value="15">
         </div>
       </div>
 

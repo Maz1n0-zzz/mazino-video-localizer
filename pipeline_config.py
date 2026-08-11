@@ -10,6 +10,8 @@ DEFAULTS = {
     "model_name": "medium",
     "voice_role": "vi-VN-HoaiMyNeural",
     "inpaint_mode": "sttn-auto",
+    # Khoảng cách phụ đề mới tới đáy video (% chiều cao) — vùng an toàn TikTok.
+    "subtitle_bottom_pct": 15,
 }
 
 

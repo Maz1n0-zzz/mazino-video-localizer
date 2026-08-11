@@ -81,14 +81,19 @@ def _log(job_id, msg):
         JOBS[job_id]["logs"].append(msg)
 
 
-def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_role, inpaint_mode):
+def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_role,
+             inpaint_mode, sub_areas, subtitle_bottom_pct):
     work_dir = OUTPUT_DIR / f"_work_{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
         orch.preflight_checks()
 
-        _log(job_id, "[1/4] Đang xoá sub/logo cũ (video-subtitle-remover)...")
-        cleaned = orch.remove_old_subtitles(input_video, work_dir, inpaint_mode)
+        if sub_areas:
+            _log(job_id, f"[1/4] Đang xoá sub/logo cũ ({len(sub_areas)} vùng đã chọn)...")
+            cleaned = orch.remove_old_subtitles(input_video, work_dir, inpaint_mode, sub_areas=sub_areas)
+        else:
+            _log(job_id, "[1/4] Không chọn vùng xoá sub/logo — giữ nguyên video gốc, bỏ qua bước này.")
+            cleaned = orch.remove_old_subtitles(input_video, work_dir, inpaint_mode, sub_areas=None)
         _log(job_id, "✓ Xong bước 1/4")
 
         _log(job_id, "[2/4] Đang transcribe + dịch + dub (pyvideotrans)... "
@@ -107,7 +112,7 @@ def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_ro
 
         _log(job_id, "[3/4] Đang tạo lại phụ đề đúng vị trí cho video này...")
         width, height = orch.probe_resolution(cleaned)
-        ass_path = orch.build_fixed_ass(dub_srt, work_dir, width, height)
+        ass_path = orch.build_fixed_ass(dub_srt, work_dir, width, height, bottom_pct=subtitle_bottom_pct)
         _log(job_id, "✓ Xong bước 3/4")
 
         _log(job_id, "[4/4] Đang ghép video cuối cùng...")
@@ -143,6 +148,7 @@ def get_config():
         "model_choices": MODEL_CHOICES,
         "inpaint_choices": INPAINT_CHOICES,
         "voices": voices_for_lang(cfg["target_lang"]),
+        "subtitle_bottom_pct": cfg.get("subtitle_bottom_pct", 15),
     }
 
 
@@ -157,6 +163,27 @@ async def post_config(payload: dict):
     return {"config": merged}
 
 
+def _parse_sub_areas(raw):
+    """Parse chuỗi JSON các vùng [{ymin,ymax,xmin,xmax}, ...] từ UI thành list tuple.
+    Trả về [] nếu rỗng/lỗi (an toàn: coi như không chọn vùng -> bỏ qua bước xoá)."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    areas = []
+    for a in data:
+        try:
+            ymin, ymax = sorted((int(a["ymin"]), int(a["ymax"])))
+            xmin, xmax = sorted((int(a["xmin"]), int(a["xmax"])))
+            if ymax - ymin >= 2 and xmax - xmin >= 2:
+                areas.append((ymin, ymax, xmin, xmax))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return areas
+
+
 @app.post("/api/run")
 async def run_pipeline(
     video: UploadFile = File(...),
@@ -165,6 +192,8 @@ async def run_pipeline(
     model_name: str = Form(...),
     voice_role: str = Form(...),
     inpaint_mode: str = Form(...),
+    sub_areas: str = Form(""),
+    subtitle_bottom_pct: int = Form(15),
 ):
     job_id = uuid.uuid4().hex[:12]
     suffix = Path(video.filename or "input.mp4").suffix or ".mp4"
@@ -172,10 +201,14 @@ async def run_pipeline(
     with saved_path.open("wb") as f:
         shutil.copyfileobj(video.file, f)
 
+    parsed_areas = _parse_sub_areas(sub_areas)
+    bottom_pct = max(0, min(int(subtitle_bottom_pct), 45))
+
     JOBS[job_id] = {"logs": [], "status": "running", "result": None}
     thread = threading.Thread(
         target=_run_job,
-        args=(job_id, saved_path, source_lang, target_lang, model_name, voice_role, inpaint_mode),
+        args=(job_id, saved_path, source_lang, target_lang, model_name, voice_role,
+              inpaint_mode, parsed_areas, bottom_pct),
         daemon=True,
     )
     thread.start()
