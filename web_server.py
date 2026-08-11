@@ -98,6 +98,13 @@ def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_ro
         )
         _log(job_id, "✓ Xong bước 2/4")
 
+        # Giữ lại srt gốc (transcribe) + srt dịch để debug chất lượng transcribe/dịch —
+        # work_dir sẽ bị xoá sạch ở finally nên phải copy ra OUTPUT_DIR ngay.
+        raw_srt = dub_srt.parent / f"{source_lang}.srt"
+        if raw_srt.exists():
+            shutil.copy2(raw_srt, OUTPUT_DIR / f"{job_id}_{source_lang}_raw.srt")
+        shutil.copy2(dub_srt, OUTPUT_DIR / f"{job_id}_{target_lang}_translated.srt")
+
         _log(job_id, "[3/4] Đang tạo lại phụ đề đúng vị trí cho video này...")
         width, height = orch.probe_resolution(cleaned)
         ass_path = orch.build_fixed_ass(dub_srt, work_dir, width, height)
@@ -204,7 +211,8 @@ def get_output(filename: str):
     path = OUTPUT_DIR / filename
     if not path.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(path, media_type="video/mp4", filename=filename)
+    media_type = "video/mp4" if path.suffix == ".mp4" else "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=filename)
 
 
 app.mount("/", StaticFiles(directory=PROJECT_ROOT / "web_static", html=True), name="static")

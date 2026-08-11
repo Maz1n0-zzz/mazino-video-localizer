@@ -12,6 +12,7 @@ from videotrans.configure.config import tr, settings, app_cfg, logger, ROOT_DIR
 from videotrans.configure.excepts import DubbingSrtError
 from videotrans.tts._base import BaseTTS
 from videotrans.util import tools
+from videotrans.util.pronounce_dict import apply_pronounce_dict
 
 # edge-tts 限流，可能产生大量超时、401等错误
 
@@ -60,7 +61,7 @@ class EdgeTTS(BaseTTS):
                         if attempt>0:
                             msg= f'Retry after {attempt}nd  '
                         communicate = Communicate(
-                            item['text'], voice=item['role'], rate=self.rate,
+                            apply_pronounce_dict(item['text']), voice=item['role'], rate=self.rate,
                             volume=self.volume, proxy=self.useproxy, pitch=self.pitch, connect_timeout=5
                         )
                         # 防止WebSocket连接或数据读取无限挂起
