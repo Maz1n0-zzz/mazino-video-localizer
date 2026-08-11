@@ -69,7 +69,10 @@ jobs:
         shell: pwsh
         run: |
           uv venv --python 3.12 web_env
-          uv pip install --python web_env\Scripts\python.exe fastapi "uvicorn[standard]" python-multipart edge-tts pyinstaller huggingface_hub
+          # huggingface_hub ghim dung ban pyvideotrans dang dung (xem
+          # vendor/pyvideotrans/pyproject.toml) de dam bao API snapshot_download
+          # (tham so local_dir_use_symlinks) hoat dong giong nhu code goc.
+          uv pip install --python web_env\Scripts\python.exe fastapi "uvicorn[standard]" python-multipart edge-tts pyinstaller "huggingface_hub==1.10.0"
 
       - name: Build web_server.exe
         shell: pwsh
@@ -119,12 +122,29 @@ jobs:
           Copy-Item $probe.FullName dist_stage\ffmpeg\ffprobe.exe
 
       # ---------- tải sẵn model whisper "medium" (offline bundling) ----------
+      # pyvideotrans doc model.bin/config.json truc tiep tu
+      # <ROOT>/models/models--<org>--<name>/ (khong co tang snapshots/blobs) -
+      # xem videotrans/util/help_down.py: sau khi snapshot_download(local_dir=..)
+      # xong, no tu xoa het cac thu muc cache blobs/refs/snapshots/.cache/
+      # .no_exist, chi giu file thuc su nam thang trong local_dir. Lan build
+      # truoc dung HF_HUB_CACHE (kieu cache mac dinh, model.bin chi la symlink
+      # trong snapshots/<hash>/, file thuc nam trong blobs/) khong khop cau
+      # truc nay -> RuntimeError "Unable to open file 'model.bin'" khi chay
+      # thuc te tren Windows. Sua lai dung y nhu pyvideotrans tu lam.
       - name: Pre-download faster-whisper medium model
         shell: pwsh
-        env:
-          HF_HUB_CACHE: ${{ github.workspace }}\dist_stage\pvt_models
         run: |
-          web_env\Scripts\python.exe -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Systran/faster-whisper-medium')"
+          $localDir = "dist_stage\pvt_models\models--Systran--faster-whisper-medium"
+          New-Item -ItemType Directory -Force -Path $localDir | Out-Null
+          web_env\Scripts\python.exe -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Systran/faster-whisper-medium', local_dir=r'$localDir', local_dir_use_symlinks=False)"
+          foreach ($junk in @('blobs', 'refs', 'snapshots', '.cache', '.no_exist')) {
+            $p = Join-Path $localDir $junk
+            if (Test-Path $p) { Remove-Item -Recurse -Force $p }
+          }
+          $modelBin = Join-Path $localDir "model.bin"
+          if (-not (Test-Path $modelBin) -or (Get-Item $modelBin).Length -eq 0) {
+            throw "model.bin thieu hoac rong sau khi tai + don rac tai $modelBin"
+          }
 
       # ---------- gộp thành setup.exe bằng Inno Setup ----------
       # KHÔNG dùng action Minionguyjpro/Inno-Setup-Action — bug thật trong
