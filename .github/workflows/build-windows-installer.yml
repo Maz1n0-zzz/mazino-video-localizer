@@ -10,9 +10,6 @@ name: build-windows-installer
 on:
   workflow_dispatch: {}
 
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: windows-latest
@@ -164,28 +161,15 @@ jobs:
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /Q "installer\setup.iss" "/DStageDir=${{ github.workspace }}\dist_stage"
           if ($LASTEXITCODE -ne 0) { throw "ISCC.exe exited with code $LASTEXITCODE" }
 
+      # KHONG dung GitHub Release cho installer nay: da thu (xem log run
+      # 31453629544) va bi HTTP 422 "size must be less than 2147483648" -
+      # Release gioi han cung 2GB/file, con installer ~4GB (bundle ca model AI
+      # + ffmpeg + 2 engine) vuot gioi han nay. Actions Artifact khong co gioi
+      # han nay nen day la cach duy nhat dung duoc cho file lon co nay, du toc
+      # do tai cham hon Release.
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: MazinoVideoLocalizer-Setup
           path: dist_installer/*.exe
           retention-days: 14
-
-      # ---------- publish lên GitHub Release (tải nhanh hơn Actions Artifact) ----------
-      # Actions Artifact dùng hạ tầng lưu trữ riêng của Actions, tốc độ tải
-      # file lớn (~4GB) rất chậm/không ổn định trong thực tế (phát hiện qua
-      # test thật: >2h cho 1 file dù đường truyền mạng không phải nguyên
-      # nhân). GitHub Releases dùng CDN riêng (Fastly), tải nhanh hơn nhiều
-      # và hỗ trợ resume. Ghi đè tag "latest" mỗi lần build để user luôn có
-      # 1 link cố định trỏ tới bản mới nhất.
-      - name: Publish installer to GitHub Release (faster download)
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $exe = Get-ChildItem -Path dist_installer -Filter *.exe | Select-Object -First 1
-          gh release delete latest --yes --cleanup-tag --repo "${{ github.repository }}" 2>$null
-          gh release create latest $exe.FullName `
-            --repo "${{ github.repository }}" `
-            --title "Mazino Video Localizer (ban moi nhat)" `
-            --notes "Auto-build tu commit ${{ github.sha }}. Tai file .exe ben duoi - nhanh hon nhieu so voi Artifact cua Actions."
