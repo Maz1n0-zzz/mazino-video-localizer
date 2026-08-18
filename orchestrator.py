@@ -182,12 +182,16 @@ def transcribe_translate_dub(input_video, work_dir, source_lang, target_lang,
     return dub_audio, dub_srt
 
 
-def build_fixed_ass(srt_path, work_dir, width, height, bottom_pct=15):
+def build_fixed_ass(srt_path, work_dir, width, height, bottom_pct=15, sub_box=None):
     """Convert srt->ass rồi patch PlayRes + font/margin cho đúng tỉ lệ video thật.
 
     bottom_pct: khoảng cách từ đáy video lên tới phụ đề, tính theo % chiều cao.
-    Mặc định 15% (vùng an toàn TikTok — tránh bị caption/nút của TikTok che). Giá
-    trị cũ 5% khiến sub nằm quá sát đáy, dễ bị UI TikTok che (phản hồi thực tế).
+    Mặc định 15% (vùng an toàn TikTok — tránh bị caption/nút của TikTok che).
+
+    sub_box: nếu truyền (ymin, ymax, xmin, xmax) theo pixel gốc -> đặt phụ đề mới
+    NẰM TRONG ô này (căn giữa ô, cỡ chữ tự co vừa chiều cao ô, câu dài tự xuống
+    dòng trong bề ngang ô). Dùng khi muốn sub mới đè lên đúng chỗ sub cũ đã blur.
+    Nếu None -> đặt ở đáy như cũ theo bottom_pct.
     """
     stage = "Tạo phụ đề mới đúng vị trí"
     ass_path = work_dir / "fixed.ass"
@@ -199,16 +203,44 @@ def build_fixed_ass(srt_path, work_dir, width, height, bottom_pct=15):
     text = ass_path.read_text(encoding="utf-8-sig")
     text = re.sub(r"PlayResX:\s*\d+", f"PlayResX: {width}", text)
     text = re.sub(r"PlayResY:\s*\d+", f"PlayResY: {height}", text)
-
-    fontsize = max(16, round(height * 0.035))
     outline = max(1, round(height * 0.0025))
-    margin_v = round(height * max(0, min(bottom_pct, 45)) / 100)
-    margin_lr = round(width * 0.04)
-    new_style = (
-        f"Style: Default,Arial,{fontsize},&Hffffff,&Hffffff,&H0,&H80000000,"
-        f"0,0,0,0,100,100,0,0,1,{outline},0,2,{margin_lr},{margin_lr},{margin_v},1"
-    )
-    text = re.sub(r"^Style: Default,.*$", new_style, text, count=1, flags=re.MULTILINE)
+
+    if sub_box is not None:
+        ymin, ymax, xmin, xmax = sub_box
+        box_h = max(1, ymax - ymin)
+        # Co chu vua ~2 dong trong o: 2 dong * ~1.2 line-height <= box_h ->
+        # fontsize ~ box_h / 2.4. Chan tren de tranh chu qua to voi o cao,
+        # chan duoi 14px de con doc duoc voi o thap.
+        fontsize = max(14, min(round(box_h * 0.40), round(box_h * 0.72)))
+        cx = round((xmin + xmax) / 2)
+        cy = round((ymin + ymax) / 2)
+        margin_l = max(0, round(xmin))
+        margin_r = max(0, round(width - xmax))
+        # Alignment 5 = giua-giua; \pos + \an5 chèn vào từng dòng để căn chính
+        # xác tâm ô. MarginL/R vẫn quy định bề ngang để libass tự xuống dòng.
+        new_style = (
+            f"Style: Default,Arial,{fontsize},&Hffffff,&Hffffff,&H0,&H80000000,"
+            f"0,0,0,0,100,100,0,0,1,{outline},0,5,{margin_l},{margin_r},0,1"
+        )
+        text = re.sub(r"^Style: Default,.*$", new_style, text, count=1, flags=re.MULTILINE)
+        # Chèn override {\an5\pos(cx,cy)} vào đầu phần text của mỗi dòng Dialogue
+        # (9 field trước text theo chuẩn ASS, text là phần còn lại sau dấu phẩy thứ 9).
+        pos_tag = f"{{\\an5\\pos({cx},{cy})}}"
+        text = re.sub(
+            r"^(Dialogue:(?:[^,]*,){9})(.*)$",
+            lambda m: m.group(1) + pos_tag + m.group(2),
+            text, flags=re.MULTILINE,
+        )
+    else:
+        fontsize = max(16, round(height * 0.035))
+        margin_v = round(height * max(0, min(bottom_pct, 45)) / 100)
+        margin_lr = round(width * 0.04)
+        new_style = (
+            f"Style: Default,Arial,{fontsize},&Hffffff,&Hffffff,&H0,&H80000000,"
+            f"0,0,0,0,100,100,0,0,1,{outline},0,2,{margin_lr},{margin_lr},{margin_v},1"
+        )
+        text = re.sub(r"^Style: Default,.*$", new_style, text, count=1, flags=re.MULTILINE)
+
     ass_path.write_text(text, encoding="utf-8")
     return ass_path
 
@@ -247,6 +279,8 @@ def main():
                               "Không truyền -> bỏ qua bước xoá sub.")
     parser.add_argument("--subtitle-bottom-pct", type=int, default=int(cfg.get("subtitle_bottom_pct", 15)),
                          help="Khoảng cách phụ đề mới tới đáy video, tính theo %% chiều cao (mặc định 15).")
+    parser.add_argument("--sub-in-region", action="store_true",
+                         help="Đặt phụ đề mới vào ô --sub-area to nhất (đè lên chỗ sub cũ) thay vì ở đáy.")
     parser.add_argument("--output", default=None, help="File output cuối (mặc định: <input>_<target-lang>.mp4)")
     parser.add_argument("--keep-temp", action="store_true", help="Giữ lại thư mục tạm để debug")
     parser.add_argument("--save-as-default", action="store_true",
@@ -284,7 +318,12 @@ def main():
 
         print("== Bước 3/4: tự tạo sub mới đúng vị trí (fix PlayRes bug) ==")
         width, height = probe_resolution(cleaned_video)
-        ass_path = build_fixed_ass(dub_srt, work_dir, width, height, bottom_pct=args.subtitle_bottom_pct)
+        sub_box = None
+        if args.sub_in_region and args.sub_area:
+            sub_box = max(args.sub_area, key=lambda a: (a[1] - a[0]) * (a[3] - a[2]))
+            print(f"[sub] Đặt phụ đề vào ô {sub_box}")
+        ass_path = build_fixed_ass(dub_srt, work_dir, width, height,
+                                    bottom_pct=args.subtitle_bottom_pct, sub_box=sub_box)
 
         print("== Bước 4/4: ghép video sạch + audio dub + sub mới ==")
         compose_final(cleaned_video, dub_audio, ass_path, output_path)

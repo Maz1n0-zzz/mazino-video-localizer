@@ -61,6 +61,7 @@ const els = {
   saveDefaultLink: document.getElementById("save-default-link"),
   cancelVideoBtn: document.getElementById("cancel-video-btn"),
   subtitleBottomPct: document.getElementById("subtitle_bottom_pct"),
+  placeSubInRegion: document.getElementById("place_sub_in_region"),
   regionPanel: document.getElementById("region-panel"),
   regionStartBtn: document.getElementById("region-start-btn"),
   regionCount: document.getElementById("region-count"),
@@ -286,6 +287,7 @@ els.runBtn.addEventListener("click", async () => {
   form.append("voice_role", els.voiceRole.value);
   form.append("inpaint_mode", els.inpaintMode.value);
   form.append("subtitle_bottom_pct", els.subtitleBottomPct.value || "15");
+  form.append("place_sub_in_region", els.placeSubInRegion.checked ? "true" : "false");
   // VSR nhận theo thứ tự ymin,ymax,xmin,xmax
   form.append("sub_areas", JSON.stringify(subAreas.map((b) => ({
     ymin: b.ymin, ymax: b.ymax, xmin: b.xmin, xmax: b.xmax,

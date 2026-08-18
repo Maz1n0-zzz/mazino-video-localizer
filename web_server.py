@@ -90,7 +90,7 @@ def _log(job_id, msg):
 
 
 def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_role,
-             inpaint_mode, sub_areas, subtitle_bottom_pct):
+             inpaint_mode, sub_areas, subtitle_bottom_pct, place_sub_in_region):
     work_dir = OUTPUT_DIR / f"_work_{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -120,7 +120,16 @@ def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_ro
 
         _log(job_id, "[3/4] Đang tạo lại phụ đề đúng vị trí cho video này...")
         width, height = orch.probe_resolution(cleaned)
-        ass_path = orch.build_fixed_ass(dub_srt, work_dir, width, height, bottom_pct=subtitle_bottom_pct)
+        sub_box = None
+        if place_sub_in_region and sub_areas:
+            # Chọn ô TO NHẤT (theo diện tích) làm chỗ đặt sub — thường dải sub
+            # rộng hơn ô logo. sub_areas: (ymin, ymax, xmin, xmax).
+            sub_box = max(sub_areas, key=lambda a: (a[1] - a[0]) * (a[3] - a[2]))
+            _log(job_id, f"    → Đặt phụ đề mới vào ô đã khoanh {sub_box} (tự co cỡ chữ)")
+        ass_path = orch.build_fixed_ass(
+            dub_srt, work_dir, width, height,
+            bottom_pct=subtitle_bottom_pct, sub_box=sub_box,
+        )
         _log(job_id, "✓ Xong bước 3/4")
 
         _log(job_id, "[4/4] Đang ghép video cuối cùng...")
@@ -202,6 +211,7 @@ async def run_pipeline(
     inpaint_mode: str = Form(...),
     sub_areas: str = Form(""),
     subtitle_bottom_pct: int = Form(15),
+    place_sub_in_region: bool = Form(False),
 ):
     job_id = uuid.uuid4().hex[:12]
     suffix = Path(video.filename or "input.mp4").suffix or ".mp4"
@@ -216,7 +226,7 @@ async def run_pipeline(
     thread = threading.Thread(
         target=_run_job,
         args=(job_id, saved_path, source_lang, target_lang, model_name, voice_role,
-              inpaint_mode, parsed_areas, bottom_pct),
+              inpaint_mode, parsed_areas, bottom_pct, bool(place_sub_in_region)),
         daemon=True,
     )
     thread.start()

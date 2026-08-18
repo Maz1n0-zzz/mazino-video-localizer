@@ -158,6 +158,12 @@ input.opt-pill { width: 100%; }
 input.opt-pill[type="number"] {
   -moz-appearance: textfield;
 }
+.opt-check {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin-top: 12px; font-size: 0.82rem; color: var(--subdued);
+  line-height: 1.45; cursor: pointer;
+}
+.opt-check input { margin-top: 2px; flex-shrink: 0; accent-color: var(--accent2); }
 
 .run-btn {
   width: 100%; height: 52px; border: none; border-radius: 999px;
