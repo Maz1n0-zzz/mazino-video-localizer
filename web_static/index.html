@@ -81,8 +81,27 @@
           <select id="target_lang" class="opt-pill"></select>
         </div>
         <div class="opt-row">
+          <div class="opt-label"><span class="ic" id="icon-mic"></span><span>Kiểu giọng đọc</span></div>
+          <select id="tts_engine" class="opt-pill">
+            <option value="edge">Edge-TTS — miễn phí, giọng có sẵn</option>
+            <option value="f5clone">Clone giọng từ file mẫu (F5-TTS)</option>
+          </select>
+        </div>
+        <div class="opt-row" id="row-voice-role">
           <div class="opt-label"><span class="ic" id="icon-headphones"></span><span>Giọng đọc (Edge-TTS)</span></div>
           <select id="voice_role" class="opt-pill"></select>
+        </div>
+        <div id="clone-panel" style="display:none">
+          <label class="opt-check" style="margin-top:6px">
+            <span>File giọng mẫu để clone (~10-30s, 1 người nói, không nhạc nền — WAV/MP3/M4A):</span>
+          </label>
+          <div class="region-bar">
+            <input type="file" id="ref-audio-input" accept="audio/*" hidden>
+            <button type="button" class="pill-btn" id="ref-audio-btn">🎙️ Chọn file giọng mẫu</button>
+            <span id="ref-audio-name" class="region-count"></span>
+          </div>
+          <p class="region-hint">Bỏ trống lời thoại bên dưới thì hệ thống tự nhận. Nếu tự nhận sai, gõ đúng lời trong đoạn mẫu (viết thường) vào đây:</p>
+          <input type="text" id="ref-text" class="opt-pill" placeholder="(tuỳ chọn) lời thoại của đoạn giọng mẫu, viết thường">
         </div>
         <div class="opt-row">
           <div class="opt-label"><span class="ic" id="icon-gauge"></span><span>Whisper model (STT)</span></div>

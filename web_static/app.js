@@ -13,6 +13,7 @@ const ICONS = {
   cloud: '<path d="M8 17l4 4 4-4"/><path d="M12 12v9"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/>',
   clapper: '<path d="M20 6H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2z"/><path d="M2 8l3-4h3l-3 4M8 8l3-4h3l-3 4M14 8l3-4h3l-3 4"/>',
   caption: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 12h4M7 15h2M14 12h3M14 15h3"/>',
+  mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>',
 };
 
 function svg(name, vb = "0 0 24 24") {
@@ -39,6 +40,7 @@ setIcon("icon-upload", "upload");
 setIcon("icon-cloud", "cloud");
 setIcon("icon-clapper", "clapper");
 setIcon("icon-caption", "caption");
+setIcon("icon-mic", "mic");
 
 const els = {
   sourceLang: document.getElementById("source_lang"),
@@ -62,6 +64,13 @@ const els = {
   cancelVideoBtn: document.getElementById("cancel-video-btn"),
   subtitleBottomPct: document.getElementById("subtitle_bottom_pct"),
   placeSubInRegion: document.getElementById("place_sub_in_region"),
+  ttsEngine: document.getElementById("tts_engine"),
+  rowVoiceRole: document.getElementById("row-voice-role"),
+  clonePanel: document.getElementById("clone-panel"),
+  refAudioBtn: document.getElementById("ref-audio-btn"),
+  refAudioInput: document.getElementById("ref-audio-input"),
+  refAudioName: document.getElementById("ref-audio-name"),
+  refText: document.getElementById("ref-text"),
   regionPanel: document.getElementById("region-panel"),
   regionStartBtn: document.getElementById("region-start-btn"),
   regionCount: document.getElementById("region-count"),
@@ -74,6 +83,20 @@ const els = {
 
 let selectedFile = null;
 let cfgCache = null;
+let refAudioFile = null;
+
+// ---- Chuyển đổi Edge-TTS <-> Clone giọng ----
+function updateTtsEngine() {
+  const isClone = els.ttsEngine.value === "f5clone";
+  els.rowVoiceRole.style.display = isClone ? "none" : "";
+  els.clonePanel.style.display = isClone ? "block" : "none";
+}
+els.ttsEngine.addEventListener("change", updateTtsEngine);
+els.refAudioBtn.addEventListener("click", () => els.refAudioInput.click());
+els.refAudioInput.addEventListener("change", () => {
+  refAudioFile = els.refAudioInput.files[0] || null;
+  els.refAudioName.textContent = refAudioFile ? `✓ ${refAudioFile.name}` : "";
+});
 
 // ---- Khoanh vùng xoá sub/logo (toạ độ theo PIXEL GỐC của video) ----
 let subAreas = [];       // [{xmin,ymin,xmax,ymax}]
@@ -288,6 +311,16 @@ els.runBtn.addEventListener("click", async () => {
   form.append("inpaint_mode", els.inpaintMode.value);
   form.append("subtitle_bottom_pct", els.subtitleBottomPct.value || "15");
   form.append("place_sub_in_region", els.placeSubInRegion.checked ? "true" : "false");
+  form.append("tts_engine", els.ttsEngine.value);
+  if (els.ttsEngine.value === "f5clone") {
+    if (!refAudioFile) {
+      appendLog("Bạn chọn Clone giọng nhưng chưa chọn file giọng mẫu.");
+      setRunning(false);
+      return;
+    }
+    form.append("ref_audio", refAudioFile);
+    form.append("ref_text", els.refText.value || "");
+  }
   // VSR nhận theo thứ tự ymin,ymax,xmin,xmax
   form.append("sub_areas", JSON.stringify(subAreas.map((b) => ({
     ymin: b.ymin, ymax: b.ymax, xmin: b.xmin, xmax: b.xmax,

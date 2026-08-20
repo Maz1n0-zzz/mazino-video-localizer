@@ -5,6 +5,7 @@ Chạy: source web_env/bin/activate && python3 web_server.py
 import asyncio
 import json
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -90,7 +91,8 @@ def _log(job_id, msg):
 
 
 def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_role,
-             inpaint_mode, sub_areas, subtitle_bottom_pct, place_sub_in_region):
+             inpaint_mode, sub_areas, subtitle_bottom_pct, place_sub_in_region,
+             tts_engine, ref_audio_path, ref_text):
     work_dir = OUTPUT_DIR / f"_work_{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -117,6 +119,18 @@ def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_ro
         if raw_srt.exists():
             shutil.copy2(raw_srt, OUTPUT_DIR / f"{job_id}_{source_lang}_raw.srt")
         shutil.copy2(dub_srt, OUTPUT_DIR / f"{job_id}_{target_lang}_translated.srt")
+
+        # Nếu chọn clone giọng: thay bản dub Edge-TTS bằng giọng clone F5 theo
+        # đúng timing của srt dịch (pyvideotrans vẫn lo transcribe+dịch ở trên).
+        if tts_engine == "f5clone" and ref_audio_path:
+            # Nếu user không nhập lời thoại mẫu -> tự nhận diện để F5 clone chuẩn hơn.
+            rtext = ref_text
+            if not rtext:
+                _log(job_id, "    → Đang nhận diện lời thoại của giọng mẫu...")
+                rtext = orch.transcribe_audio(ref_audio_path) or ""
+            _log(job_id, "    → Đang tạo giọng CLONE bằng F5-TTS (có thể lâu, tuỳ độ dài & phần cứng)...")
+            dub_audio = orch.synthesize_clone_dub(dub_srt, ref_audio_path, rtext, work_dir)
+            _log(job_id, "    ✓ Xong giọng clone")
 
         _log(job_id, "[3/4] Đang tạo lại phụ đề đúng vị trí cho video này...")
         width, height = orch.probe_resolution(cleaned)
@@ -152,6 +166,11 @@ def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_ro
         shutil.rmtree(work_dir, ignore_errors=True)
         try:
             input_video.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            if ref_audio_path:
+                Path(ref_audio_path).unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -212,6 +231,9 @@ async def run_pipeline(
     sub_areas: str = Form(""),
     subtitle_bottom_pct: int = Form(15),
     place_sub_in_region: bool = Form(False),
+    tts_engine: str = Form("edge"),
+    ref_text: str = Form(""),
+    ref_audio: UploadFile = File(None),
 ):
     job_id = uuid.uuid4().hex[:12]
     suffix = Path(video.filename or "input.mp4").suffix or ".mp4"
@@ -222,11 +244,25 @@ async def run_pipeline(
     parsed_areas = _parse_sub_areas(sub_areas)
     bottom_pct = max(0, min(int(subtitle_bottom_pct), 45))
 
+    # Chế độ clone giọng: lưu file giọng mẫu, convert sang wav mono 24k (chuẩn F5).
+    ref_wav = None
+    if tts_engine == "f5clone" and ref_audio is not None and ref_audio.filename:
+        raw_ref = UPLOAD_DIR / f"{job_id}_ref{Path(ref_audio.filename).suffix or '.m4a'}"
+        with raw_ref.open("wb") as f:
+            shutil.copyfileobj(ref_audio.file, f)
+        ref_wav = UPLOAD_DIR / f"{job_id}_ref.wav"
+        subprocess.run(
+            [orch.FFMPEG_BIN, "-y", "-i", str(raw_ref), "-ac", "1", "-ar", "24000", str(ref_wav)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        raw_ref.unlink(missing_ok=True)
+
     JOBS[job_id] = {"logs": [], "status": "running", "result": None}
     thread = threading.Thread(
         target=_run_job,
         args=(job_id, saved_path, source_lang, target_lang, model_name, voice_role,
-              inpaint_mode, parsed_areas, bottom_pct, bool(place_sub_in_region)),
+              inpaint_mode, parsed_areas, bottom_pct, bool(place_sub_in_region),
+              tts_engine, str(ref_wav) if ref_wav else None, ref_text.strip().lower()),
         daemon=True,
     )
     thread.start()

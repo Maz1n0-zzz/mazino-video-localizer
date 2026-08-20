@@ -14,6 +14,7 @@ Usage:
 """
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -55,6 +56,18 @@ else:
     PVT_CMD_BASE = [str(PVT_PY), "cli.py"]
     FFMPEG_BIN = "ffmpeg"
     FFPROBE_BIN = "ffprobe"
+
+# --- F5-TTS voice clone (chạy trong f5env riêng, cô lập khỏi venv pyvideotrans) ---
+F5_CLONE_SCRIPT = PROJECT_ROOT / "f5_clone.py"
+if FROZEN:
+    F5_PY = INSTALL_ROOT / "f5" / "python.exe"
+    F5_MODEL_DIR = INSTALL_ROOT / "f5" / "models" / "f5-vi"
+else:
+    if sys.platform == "win32":
+        F5_PY = PROJECT_ROOT / "f5env" / "Scripts" / "python.exe"
+    else:
+        F5_PY = PROJECT_ROOT / "f5env" / "bin" / "python"
+    F5_MODEL_DIR = PROJECT_ROOT / "models" / "f5-vi"
 
 
 class PipelineStageError(RuntimeError):
@@ -180,6 +193,80 @@ def transcribe_translate_dub(input_video, work_dir, source_lang, target_lang,
             f"Kiểm tra lại mã ngôn ngữ (--source-lang/--target-lang) và voice_role có hợp lệ không.",
         )
     return dub_audio, dub_srt
+
+
+def transcribe_audio(wav_path):
+    """Nhận diện lời thoại 1 file audio bằng faster-whisper của pyvideotrans (dev mode).
+
+    Dùng để lấy ref_text cho F5 clone khi người dùng để trống. Chỉ chạy được ở
+    dev mode (PVT_PY là python thật có faster_whisper). Frozen/Windows trả None ->
+    F5 sẽ tự transcribe. Lỗi bất kỳ -> None (F5 tự lo), không làm hỏng pipeline.
+    """
+    if FROZEN:
+        return None
+    code = (
+        "import sys;from faster_whisper import WhisperModel;"
+        "m=WhisperModel('small',device='cpu',compute_type='int8');"
+        "segs,_=m.transcribe(sys.argv[1],beam_size=5);"
+        "print(' '.join(s.text.strip() for s in segs))"
+    )
+    try:
+        out = subprocess.run(
+            [str(PVT_PY), "-c", code, str(wav_path)],
+            check=True, capture_output=True, text=True, timeout=180,
+        )
+        return out.stdout.strip().lower() or None
+    except Exception as e:
+        print(f"[transcribe_audio] Không transcribe được ref, để F5 tự lo: {e}")
+        return None
+
+
+def synthesize_clone_dub(dub_srt, ref_wav, ref_text, work_dir, device=None):
+    """Tạo track audio dub bằng giọng CLONE (F5-TTS) theo timing của dub_srt.
+
+    Gọi f5_clone.py trong f5env riêng (không đụng venv pyvideotrans). Dùng thay
+    cho bản dub Edge-TTS khi người dùng chọn chế độ clone giọng.
+    """
+    stage = "F5 clone giọng"
+    out_wav = work_dir / "clone_dub.wav"
+    if not Path(F5_PY).exists():
+        raise PipelineStageError(
+            stage, f"Chưa cài môi trường F5 (f5env). Chạy lại setup để cài. Thiếu: {F5_PY}")
+    if not (F5_MODEL_DIR / "model_last.pt").exists():
+        raise PipelineStageError(
+            stage, f"Thiếu model F5 tiếng Việt ở {F5_MODEL_DIR}. Chạy lại setup để tải.")
+
+    if device is None:
+        device = "cuda" if sys.platform == "win32" else "mps"
+
+    env = dict(os.environ)
+    env["PYTHONHASHSEED"] = "0"           # tránh Fatal error lúc torch teardown
+    env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+    # torchcodec (F5 đọc audio) cần ffmpeg 4-7; máy có thể có ffmpeg 8 -> trỏ
+    # ffmpeg@6 (cài kèm) cho torchcodec tìm libavutil tương thích.
+    if sys.platform == "darwin":
+        for cand in ("/opt/homebrew/opt/ffmpeg@6/lib", "/usr/local/opt/ffmpeg@6/lib"):
+            if Path(cand).exists():
+                env["DYLD_FALLBACK_LIBRARY_PATH"] = cand + os.pathsep + env.get("DYLD_FALLBACK_LIBRARY_PATH", "")
+                break
+
+    cmd = [
+        str(F5_PY), str(F5_CLONE_SCRIPT),
+        "--ref", str(ref_wav),
+        "--ref-text", ref_text or "",
+        "--srt", str(dub_srt),
+        "--out", str(out_wav),
+        "--model-dir", str(F5_MODEL_DIR),
+        "--device", device,
+    ]
+    print(f"[run] {' '.join(str(c) for c in cmd)}")
+    try:
+        subprocess.run(cmd, check=True, env=env, cwd=str(PROJECT_ROOT))
+    except subprocess.CalledProcessError as e:
+        raise PipelineStageError(stage, f"F5 clone giọng lỗi (exit code {e.returncode})") from e
+    if not out_wav.exists():
+        raise PipelineStageError(stage, f"F5 không sinh ra file dub: {out_wav}")
+    return out_wav
 
 
 def build_fixed_ass(srt_path, work_dir, width, height, bottom_pct=15, sub_box=None):
