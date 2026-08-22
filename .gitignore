@@ -43,3 +43,6 @@ dist/
 # F5-TTS voice clone (môi trường + model tải bằng setup-clone.command, không commit)
 f5env/
 models/f5-vi/
+
+# Thư viện giọng clone (file mẫu người dùng, per-machine)
+clone_voices/

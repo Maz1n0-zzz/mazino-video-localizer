@@ -1,0 +1,108 @@
+1
+00:00:00,000 --> 00:00:02,560
+If you're still using cloud code without these five skills
+
+2
+00:00:02,760 --> 00:00:05,760
+you're literally using 10% of what it can do
+
+3
+00:00:05,860 --> 00:00:09,340
+And honestly, once you install them, you'll never code the same way again
+
+4
+00:00:09,520 --> 00:00:12,520
+Most people using cloud code are barely scratching the surface
+
+5
+00:00:12,700 --> 00:00:14,600
+still typing prompts one by one
+
+6
+00:00:14,680 --> 00:00:17,540
+while a few people quietly turned it into a full stack engineer
+
+7
+00:00:17,780 --> 00:00:19,280
+Here are the five skills doing it
+
+8
+00:00:19,400 --> 00:00:20,960
+Skill one, front-end design
+
+9
+00:00:21,160 --> 00:00:23,900
+It's the most installed design skill out there for a reason
+
+10
+00:00:23,980 --> 00:00:27,320
+Instead of a generic UI, it locks in a real design direction first
+
+11
+00:00:27,440 --> 00:00:28,240
+then builds it
+
+12
+00:00:28,300 --> 00:00:29,840
+Your app stops looking like templates
+
+13
+00:00:30,000 --> 00:00:30,840
+Skill 2
+
+14
+00:00:30,940 --> 00:00:31,400
+Code Review
+
+15
+00:00:31,560 --> 00:00:36,400
+It reads its own pull requests like a senior engineer and catches the bugs before they ever reach you
+
+16
+00:00:36,560 --> 00:00:36,720
+3
+
+17
+00:00:37,060 --> 00:00:37,960
+MCP Builder
+
+18
+00:00:37,980 --> 00:00:42,960
+It builds the connector so Cloud can actually plug into your other tools and APIs, not just
+
+19
+00:00:42,960 --> 00:00:43,800
+chat about them
+
+20
+00:00:43,920 --> 00:00:44,080
+4
+
+21
+00:00:44,200 --> 00:00:44,640
+Playwright
+
+22
+00:00:44,720 --> 00:00:49,460
+It opens a real browser, clicks through your app like a user and tells you exactly what's
+
+23
+00:00:49,460 --> 00:00:49,820
+broken
+
+24
+00:00:49,960 --> 00:00:54,460
+5. Refactor. It untangles messy code without breaking the parts that already work
+
+25
+00:00:54,460 --> 00:00:56,720
+The real secret is the setup. Get that right
+
+26
+00:00:56,840 --> 00:01:00,260
+And Claude works like a senior dev who already knows your stack
+
+27
+00:01:00,480 --> 00:01:03,340
+Comment Claude and I'll send you the complete Claude guide
+

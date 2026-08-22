@@ -163,8 +163,52 @@ def remove_old_subtitles(input_video, work_dir, inpaint_mode="sttn-auto", sub_ar
     return cleaned
 
 
+EL_CLONE_SCRIPT = PROJECT_ROOT / "el_clone.py"
+
+
+def synthesize_elevenlabs_dub(dub_srt, api_key, voice_id, model, work_dir, speed=1.0):
+    """Dub bằng ElevenLabs GỌI 1 LẦN /with-timestamps cho cả bài rồi cắt theo
+    alignment -> KHÔNG lệch ngữ điệu. Chạy el_clone.py trong venv pyvideotrans
+    (có elevenlabs/numpy/soundfile). Trả (wav, srt). Xem HANDOFF.md."""
+    stage = "ElevenLabs dub"
+    out_wav = work_dir / "el_dub.wav"
+    out_srt = work_dir / "el.srt"
+    if FROZEN:
+        py = PVT_CMD_BASE[0]  # frozen chưa hỗ trợ — cần bổ sung sau
+    else:
+        py = str(PVT_PY)
+    cmd = [py, str(EL_CLONE_SCRIPT), "--srt", str(dub_srt), "--out", str(out_wav),
+           "--out-srt", str(out_srt), "--api-key", api_key, "--voice-id", voice_id,
+           "--model", model, "--speed", str(speed)]
+    print(f"[run] el_clone (voice={voice_id} model={model})")
+    try:
+        subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT))
+    except subprocess.CalledProcessError as e:
+        raise PipelineStageError(stage, f"ElevenLabs lỗi (exit {e.returncode}) — kiểm tra API key/Voice ID/model") from e
+    if not out_wav.exists():
+        raise PipelineStageError(stage, f"Không sinh ra file dub: {out_wav}")
+    return out_wav, (out_srt if out_srt.exists() else None)
+
+
+def set_elevenlabs_config(api_key, voice_id, model="eleven_multilingual_v2", name="EL Voice"):
+    """Ghi API key + voice_id vào config của pyvideotrans để dùng ElevenLabs
+    (tts_type=22). pyvideotrans đọc key từ params.json, voice_id từ elevenlabs.json
+    theo tên role. Trả về tên role (dùng làm --voice_role)."""
+    import json as _json
+    pv = PVT_DIR / "videotrans" / "params.json"
+    d = _json.loads(pv.read_text(encoding="utf-8")) if pv.exists() else {}
+    d["elevenlabstts_key"] = api_key
+    d["elevenlabstts_models"] = model
+    pv.write_text(_json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    ev = PVT_DIR / "videotrans" / "voicejson" / "elevenlabs.json"
+    ed = _json.loads(ev.read_text(encoding="utf-8")) if ev.exists() else {}
+    ed[name] = {"name": name, "voice_id": voice_id}
+    ev.write_text(_json.dumps(ed, ensure_ascii=False), encoding="utf-8")
+    return name
+
+
 def transcribe_translate_dub(input_video, work_dir, source_lang, target_lang,
-                              model_name, voice_role):
+                              model_name, voice_role, tts_type="0"):
     stage = "pyvideotrans transcribe/dịch/dub"
     pvt_out = work_dir / "pvt_out"
     pvt_out.mkdir(exist_ok=True)
@@ -176,7 +220,7 @@ def transcribe_translate_dub(input_video, work_dir, source_lang, target_lang,
         "--source_language_code", source_lang,
         "--target_language_code", target_lang,
         "--translate_type", "0",
-        "--tts_type", "0",
+        "--tts_type", str(tts_type),
         "--voice_role", voice_role,
         "--subtitle_type", "0",
         "--voice_autorate",
@@ -229,6 +273,7 @@ def synthesize_clone_dub(dub_srt, ref_wav, ref_text, work_dir, device=None):
     """
     stage = "F5 clone giọng"
     out_wav = work_dir / "clone_dub.wav"
+    out_srt = work_dir / "clone.srt"
     if not Path(F5_PY).exists():
         raise PipelineStageError(
             stage, f"Chưa cài môi trường F5 (f5env). Chạy lại setup để cài. Thiếu: {F5_PY}")
@@ -256,6 +301,7 @@ def synthesize_clone_dub(dub_srt, ref_wav, ref_text, work_dir, device=None):
         "--ref-text", ref_text or "",
         "--srt", str(dub_srt),
         "--out", str(out_wav),
+        "--out-srt", str(out_srt),
         "--model-dir", str(F5_MODEL_DIR),
         "--device", device,
     ]
@@ -266,7 +312,7 @@ def synthesize_clone_dub(dub_srt, ref_wav, ref_text, work_dir, device=None):
         raise PipelineStageError(stage, f"F5 clone giọng lỗi (exit code {e.returncode})") from e
     if not out_wav.exists():
         raise PipelineStageError(stage, f"F5 không sinh ra file dub: {out_wav}")
-    return out_wav
+    return out_wav, (out_srt if out_srt.exists() else None)
 
 
 def build_fixed_ass(srt_path, work_dir, width, height, bottom_pct=15, sub_box=None):
@@ -332,14 +378,39 @@ def build_fixed_ass(srt_path, work_dir, width, height, bottom_pct=15, sub_box=No
     return ass_path
 
 
-def compose_final(cleaned_video, dub_audio, ass_path, output_path):
-    """Ghep: video da xoa sub cu (khong lay audio goc) + audio dub moi + sub moi dung vi tri."""
+def _media_duration(path):
+    out = subprocess.run(
+        [FFPROBE_BIN, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    try:
+        return float(out.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def compose_final(cleaned_video, dub_audio, ass_path, output_path, stretch_video=False):
+    """Ghep: video da xoa sub cu (khong lay audio goc) + audio dub moi + sub moi dung vi tri.
+
+    stretch_video: nếu True và dub dài hơn video, KÉO GIÃN video cho khớp độ dài
+    dub (setpts) — dùng cho giọng clone đọc tự nhiên (dài hơn timing gốc) để giọng
+    không bị cắt/không phải nén nhanh. Phụ đề (.ass) đã theo timing của dub nên khớp.
+    """
     stage = "Ghép video cuối"
+    vf = f"subtitles=filename='{ass_path.name}'"
+    if stretch_video:
+        vdur = _media_duration(cleaned_video)
+        adur = _media_duration(dub_audio)
+        if vdur > 0 and adur > vdur * 1.02:
+            factor = adur / vdur
+            # setpts kéo giãn thời gian video (chậm lại) cho bằng độ dài dub.
+            vf = f"setpts={factor:.4f}*PTS,{vf}"
     run([
         FFMPEG_BIN, "-y",
         "-i", str(cleaned_video),
         "-i", str(dub_audio),
-        "-filter_complex", f"[0:v]subtitles=filename='{ass_path.name}'[vout]",
+        "-filter_complex", f"[0:v]{vf}[vout]",
         "-map", "[vout]", "-map", "1:a",
         "-c:v", "libx264", "-preset", "medium", "-crf", "20",
         "-c:a", "aac",

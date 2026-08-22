@@ -56,7 +56,11 @@
             <span id="region-count" class="region-count"></span>
           </div>
           <div id="region-editor" style="display:none">
-            <p class="region-hint">Tua video tới khung có sub/logo cần xoá, rồi <b>kéo chuột</b> để khoanh vùng. Khoanh được nhiều vùng (vd sub ở đáy + logo ở giữa).</p>
+            <div class="region-bar">
+              <button type="button" class="pill-btn" id="mode-sub-btn">✏️ Khối CHE SUB (sub mới đè lên)</button>
+              <button type="button" class="pill-btn ghost" id="mode-logo-btn">✏️ Khối CHE LOGO (chỉ blur)</button>
+            </div>
+            <p class="region-hint">Chọn loại khối ở trên, rồi <b>kéo chuột</b> khoanh vùng. Khối SUB (xanh) = che sub cũ + đặt sub mới vào đó. Khối LOGO (cam) = chỉ blur, không đè sub.</p>
             <div class="region-canvas-wrap">
               <canvas id="region-canvas"></canvas>
             </div>
@@ -85,23 +89,42 @@
           <select id="tts_engine" class="opt-pill">
             <option value="edge">Edge-TTS — miễn phí, giọng có sẵn</option>
             <option value="f5clone">Clone giọng từ file mẫu (F5-TTS)</option>
+            <option value="elevenlabs">ElevenLabs — trả phí, nhập Voice ID</option>
           </select>
         </div>
         <div class="opt-row" id="row-voice-role">
-          <div class="opt-label"><span class="ic" id="icon-headphones"></span><span>Giọng đọc (Edge-TTS)</span></div>
+          <div class="opt-label"><span class="ic" id="icon-headphones"></span><span id="voice-role-label">Giọng đọc (Edge-TTS)</span></div>
           <select id="voice_role" class="opt-pill"></select>
         </div>
+        <div id="el-panel" style="display:none">
+          <p class="region-hint">Nhập API key ElevenLabs + Voice ID (giọng có sẵn hoặc giọng bạn clone trong tài khoản EL). Model mặc định eleven_multilingual_v2 (hỗ trợ tiếng Việt).</p>
+          <input type="password" id="el-api-key" class="opt-pill" placeholder="ElevenLabs API key" style="margin-bottom:8px">
+          <input type="text" id="el-voice-id" class="opt-pill" placeholder="Voice ID (vd: EXAVITQu4vr4xnSDxMaL)" style="margin-bottom:8px">
+          <select id="el-model" class="opt-pill">
+            <option value="eleven_multilingual_v2">eleven_multilingual_v2 — ổn định, tiếng Việt tốt</option>
+            <option value="eleven_v3">eleven_v3 — mới, biểu cảm hơn</option>
+            <option value="eleven_flash_v2_5">eleven_flash_v2_5 — nhanh, rẻ hơn</option>
+            <option value="eleven_turbo_v2_5">eleven_turbo_v2_5 — nhanh, cân bằng</option>
+          </select>
+        </div>
         <div id="clone-panel" style="display:none">
-          <label class="opt-check" style="margin-top:6px">
-            <span>File giọng mẫu để clone (~10-30s, 1 người nói, không nhạc nền — WAV/MP3/M4A):</span>
-          </label>
           <div class="region-bar">
-            <input type="file" id="ref-audio-input" accept="audio/*" hidden>
-            <button type="button" class="pill-btn" id="ref-audio-btn">🎙️ Chọn file giọng mẫu</button>
-            <span id="ref-audio-name" class="region-count"></span>
+            <button type="button" class="pill-btn ghost" id="add-clone-btn">➕ Thêm giọng clone mới</button>
+            <button type="button" class="pill-btn ghost" id="del-clone-btn" title="Xoá giọng đang chọn">🗑 Xoá giọng đang chọn</button>
           </div>
-          <p class="region-hint">Bỏ trống lời thoại bên dưới thì hệ thống tự nhận. Nếu tự nhận sai, gõ đúng lời trong đoạn mẫu (viết thường) vào đây:</p>
-          <input type="text" id="ref-text" class="opt-pill" placeholder="(tuỳ chọn) lời thoại của đoạn giọng mẫu, viết thường">
+          <div id="add-clone-form" style="display:none">
+            <p class="region-hint">Thêm 1 giọng mới: đặt tên + chọn file mẫu (~10-30s, 1 người nói, không nhạc nền). Lưu 1 lần, lần sau chỉ chọn trong danh sách.</p>
+            <input type="text" id="new-clone-name" class="opt-pill" placeholder="Tên giọng, vd: Voice Clone 1">
+            <div class="region-bar">
+              <input type="file" id="new-clone-file" accept="audio/*" hidden>
+              <button type="button" class="pill-btn" id="new-clone-file-btn">🎙️ Chọn file giọng</button>
+              <span id="new-clone-file-name" class="region-count"></span>
+            </div>
+            <div class="region-bar">
+              <button type="button" class="pill-btn" id="save-clone-btn">💾 Lưu giọng</button>
+              <span id="clone-save-status" class="region-count"></span>
+            </div>
+          </div>
         </div>
         <div class="opt-row">
           <div class="opt-label"><span class="ic" id="icon-gauge"></span><span>Whisper model (STT)</span></div>
@@ -115,10 +138,6 @@
           <div class="opt-label"><span class="ic" id="icon-caption"></span><span>Phụ đề cách đáy (%)</span></div>
           <input type="number" id="subtitle_bottom_pct" class="opt-pill" min="0" max="45" step="1" value="15">
         </div>
-        <label class="opt-check">
-          <input type="checkbox" id="place_sub_in_region">
-          <span>Đặt phụ đề mới vào ô đã khoanh (đè lên chỗ sub cũ, tự co cỡ chữ). Nếu tắt: sub nằm ở đáy.</span>
-        </label>
       </div>
 
       <button id="run-btn" class="run-btn"><span class="ic" id="icon-play"></span>Chạy pipeline</button>

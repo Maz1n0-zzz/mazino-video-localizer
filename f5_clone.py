@@ -22,9 +22,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-# Gioi han toc do khi nen cho vua slot (tranh giong "chipmunk"). Neu cau qua dai
-# so voi slot, chi nen toi muc nay roi cho phep tran sang chut, khong nen qua.
-MAX_SPEEDUP = 1.8
+# Gioi han toc do khi nen cho vua slot (tranh giong "chipmunk").
+MAX_SPEEDUP = 2.0
 
 
 def _fit_duration(aud, sr, target_sec):
@@ -51,6 +50,13 @@ _TS = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)")
 def _ts_to_sec(ts: str) -> float:
     h, m, s, ms = _TS.match(ts.strip()).groups()
     return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+
+
+def _sec_to_ts(t: float) -> str:
+    h = int(t // 3600); m = int((t % 3600) // 60); s = int(t % 60); ms = int(round((t - int(t)) * 1000))
+    if ms == 1000:
+        s += 1; ms = 0
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
 def parse_srt(path: Path):
@@ -80,9 +86,11 @@ def main():
     ap.add_argument("--ref-text", default="", help="Loi thoai cua giong mau (viet thuong). Rong = F5 tu transcribe")
     ap.add_argument("--srt", required=True, help="File .srt da dich (tieng Viet)")
     ap.add_argument("--out", required=True, help="File wav dub xuat ra")
+    ap.add_argument("--out-srt", default="", help="Xuat srt moi theo dung vi tri audio (de phu de khop giong)")
     ap.add_argument("--model-dir", required=True, help="Thu muc chua model_last.pt + vocab.txt")
     ap.add_argument("--device", default="mps", help="mps / cuda / cpu")
     ap.add_argument("--model-name", default="F5TTS_Base")
+    ap.add_argument("--speed", type=float, default=1.0, help="Toc do doc, <1 = cham/tu ton hon")
     args = ap.parse_args()
 
     from f5_tts.api import F5TTS
@@ -105,37 +113,40 @@ def main():
 
     ref_text = args.ref_text.strip().lower()
     sr = None
-    rendered = []  # (start_sec, np_audio)
+    rendered = []  # (text_goc, np_audio)
     for i, (start_s, end_s, text) in enumerate(segs):
-        slot = max(0.3, end_s - start_s)
         gen_text = text.strip().lower()  # model VN train o dang lowercase
         t1 = time.time()
-        # Sinh o toc do tu nhien (KHONG dung fix_duration - no tinh ca giong mau
-        # nen lech timing), roi tu nen cho vua slot bang atempo.
+        # Sinh o TOC DO TU NHIEN, KHONG nen -> giu chat tu ton nhu giong goc.
+        # (Nen ep vao timing goc lam giong doc nhanh -> loi da phan hoi.)
         wav, cur_sr, _ = f5.infer(
             ref_file=args.ref, ref_text=ref_text, gen_text=gen_text,
-            remove_silence=True,
+            speed=args.speed, remove_silence=True,
         )
         sr = cur_sr
         aud = np.asarray(wav, dtype=np.float32)
-        nat = len(aud) / sr
-        aud = _fit_duration(aud, sr, slot)
-        rendered.append((start_s, aud))
-        print(f"[f5_clone] cau {i+1}/{len(segs)} slot={slot:.1f}s nat={nat:.1f}s -> {len(aud)/sr:.1f}s  ({time.time()-t1:.1f}s)", flush=True)
+        rendered.append((text.strip(), aud))
+        print(f"[f5_clone] cau {i+1}/{len(segs)} nat={len(aud)/sr:.1f}s  ({time.time()-t1:.1f}s)", flush=True)
 
-    # Ghep len 1 timeline im lang theo dung start time cua tung cau
-    total_end = 0.0
-    for start_s, aud in rendered:
-        total_end = max(total_end, start_s + len(aud) / sr)
-    track = np.zeros(int((total_end + 0.5) * sr), dtype=np.float32)
-    for start_s, aud in rendered:
-        off = int(start_s * sr)
-        end = min(off + len(aud), len(track))
-        track[off:end] += aud[: end - off]
-    # chong clip
+    # Ghep NOI TIEP lien mach voi khoang nghi nho DEU nhau (khong dung timing goc
+    # nua -> khong con khoang trong dai). Xuat kem srt moi theo dung vi tri audio
+    # de phu de + video khop voi giong. Video se duoc keo gian cho khop o buoc compose.
+    GAP = 0.18
+    parts, srt_blocks = [], []
+    cursor = 0.0
+    for idx, (text, aud) in enumerate(rendered):
+        start = cursor
+        dur = len(aud) / sr
+        parts.append(aud)
+        parts.append(np.zeros(int(GAP * sr), dtype=np.float32))
+        srt_blocks.append(f"{idx+1}\n{_sec_to_ts(start)} --> {_sec_to_ts(start+dur)}\n{text}\n")
+        cursor = start + dur + GAP
+    track = np.concatenate(parts) if parts else np.zeros(1, dtype=np.float32)
     peak = float(np.max(np.abs(track))) if track.size else 0.0
     if peak > 1.0:
         track = track / peak * 0.98
+    if args.out_srt:
+        Path(args.out_srt).write_text("\n".join(srt_blocks), encoding="utf-8")
 
     sf.write(args.out, track, sr)
     print(f"[f5_clone] XONG -> {args.out}  ({len(track)/sr:.1f}s)", flush=True)

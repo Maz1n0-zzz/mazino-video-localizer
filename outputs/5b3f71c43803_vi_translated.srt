@@ -1,0 +1,107 @@
+1
+00:00:00,000 --> 00:00:02,760
+Nếu bạn vẫn đang sử dụng mã đám mây mà không có năm kỹ năng này
+
+2
+00:00:02,760 --> 00:00:05,860
+bạn thực sự đang sử dụng 10% những gì nó có thể làm
+
+3
+00:00:05,860 --> 00:00:09,520
+Và thành thật mà nói, một khi bạn cài đặt chúng, bạn sẽ không bao giờ viết mã theo cách tương tự nữa
+
+4
+00:00:09,520 --> 00:00:12,700
+Hầu hết mọi người sử dụng mã đám mây hầu như không gặp phải vấn đề gì
+
+5
+00:00:12,700 --> 00:00:14,540
+vẫn gõ từng lời nhắc một
+
+6
+00:00:14,680 --> 00:00:17,780
+trong khi một số người lặng lẽ biến nó thành một kỹ sư full stack
+
+7
+00:00:17,780 --> 00:00:19,400
+Dưới đây là năm kỹ năng thực hiện nó
+
+8
+00:00:19,400 --> 00:00:21,160
+Kỹ năng một, thiết kế mặt trước
+
+9
+00:00:21,160 --> 00:00:23,980
+Đó là kỹ năng thiết kế được cài đặt nhiều nhất vì một lý do
+
+10
+00:00:23,980 --> 00:00:27,440
+Thay vì một giao diện người dùng chung, trước tiên nó sẽ khóa theo hướng thiết kế thực tế
+
+11
+00:00:27,440 --> 00:00:28,300
+sau đó xây dựng nó
+
+12
+00:00:28,300 --> 00:00:30,000
+Ứng dụng của bạn không còn trông giống mẫu nữa
+
+13
+00:00:30,000 --> 00:00:30,940
+Kỹ năng 2
+
+14
+00:00:30,940 --> 00:00:31,560
+Đánh giá mã
+
+15
+00:00:31,560 --> 00:00:36,560
+Nó đọc các yêu cầu kéo của chính nó giống như một kỹ sư cấp cao và phát hiện lỗi trước khi chúng đến tay bạn
+
+16
+00:00:36,560 --> 00:00:37,060
+3
+
+17
+00:00:37,060 --> 00:00:37,980
+Trình tạo MCP
+
+18
+00:00:37,980 --> 00:00:42,960
+Nó xây dựng trình kết nối để Cloud thực sự có thể cắm vào các công cụ và API khác của bạn chứ không chỉ
+
+19
+00:00:42,960 --> 00:00:43,920
+trò chuyện về họ
+
+20
+00:00:43,920 --> 00:00:44,200
+4
+
+21
+00:00:44,200 --> 00:00:44,720
+Nhà viết kịch
+
+22
+00:00:44,720 --> 00:00:49,460
+Nó mở một trình duyệt thực, nhấp qua ứng dụng của bạn như một người dùng và cho bạn biết chính xác những gì
+
+23
+00:00:49,460 --> 00:00:49,960
+bị hỏng
+
+24
+00:00:49,960 --> 00:00:54,460
+5. Tái cấu trúc. Nó gỡ rối mã lộn xộn mà không phá vỡ các phần đã hoạt động
+
+25
+00:00:54,460 --> 00:00:56,840
+Bí mật thực sự là sự thiết lập. Làm đúng điều đó
+
+26
+00:00:56,840 --> 00:01:00,480
+Và Claude làm việc như một nhà phát triển cấp cao đã biết rõ về ngăn xếp của bạn
+
+27
+00:01:00,480 --> 00:01:03,633
+Bình luận Claude và tôi sẽ gửi cho bạn hướng dẫn Claude đầy đủ

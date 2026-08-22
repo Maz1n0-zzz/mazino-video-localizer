@@ -27,6 +27,27 @@ UPLOAD_DIR = OUTPUT_DIR / "_uploads"
 OUTPUT_DIR.mkdir(exist_ok=True)
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+# Thư viện giọng clone: mỗi giọng có tên + file wav mẫu + lời thoại (đã transcribe
+# 1 lần). Lưu bền, dùng lại như preset trong dropdown -> khỏi upload/nhận diện lại
+# mỗi lần làm video (chỉ phần F5 đọc từng câu là vẫn phải chạy theo từng video).
+CLONE_DIR = PROJECT_ROOT / "clone_voices"
+CLONE_DIR.mkdir(exist_ok=True)
+CLONE_REGISTRY = CLONE_DIR / "voices.json"
+
+
+def load_clone_voices():
+    if CLONE_REGISTRY.exists():
+        try:
+            return json.loads(CLONE_REGISTRY.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_clone_voices(d):
+    CLONE_REGISTRY.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 app = FastAPI()
 JOBS = {}
 JOBS_LOCK = threading.Lock()
@@ -91,8 +112,8 @@ def _log(job_id, msg):
 
 
 def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_role,
-             inpaint_mode, sub_areas, subtitle_bottom_pct, place_sub_in_region,
-             tts_engine, ref_audio_path, ref_text):
+             inpaint_mode, sub_areas, subtitle_bottom_pct, sub_box,
+             tts_engine, ref_audio_path, ref_text, el=None):
     work_dir = OUTPUT_DIR / f"_work_{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -108,8 +129,15 @@ def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_ro
 
         _log(job_id, "[2/4] Đang transcribe + dịch + dub (pyvideotrans)... "
                       "(lần đầu chạy 1 model mới sẽ mất thêm thời gian tải model)")
+        # Ở chế độ clone, pyvideotrans vẫn phải dub Edge-TTS (ta sẽ thay bằng F5
+        # sau) -> voice_role truyền cho nó PHẢI là giọng Edge hợp lệ, KHÔNG phải
+        # tên giọng clone ("Voice Clone 1" không tồn tại trong Edge-TTS -> lỗi).
+        pvt_voice = voice_role
+        if tts_engine in ("f5clone", "elevenlabs"):
+            _vs = voices_for_lang(target_lang)
+            pvt_voice = _vs[0] if _vs else "vi-VN-HoaiMyNeural"
         dub_audio, dub_srt = orch.transcribe_translate_dub(
-            input_video, work_dir, source_lang, target_lang, model_name, voice_role,
+            input_video, work_dir, source_lang, target_lang, model_name, pvt_voice, tts_type="0",
         )
         _log(job_id, "✓ Xong bước 2/4")
 
@@ -122,33 +150,42 @@ def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_ro
 
         # Nếu chọn clone giọng: thay bản dub Edge-TTS bằng giọng clone F5 theo
         # đúng timing của srt dịch (pyvideotrans vẫn lo transcribe+dịch ở trên).
+        # Clone giọng: giọng đọc tự nhiên (dài hơn timing gốc) -> dùng srt MỚI do
+        # F5 xuất ra (theo đúng vị trí audio) cho phụ đề + kéo giãn video cho khớp.
+        ass_srt = dub_srt
+        stretch_video = False
         if tts_engine == "f5clone" and ref_audio_path:
-            # Nếu user không nhập lời thoại mẫu -> tự nhận diện để F5 clone chuẩn hơn.
             rtext = ref_text
             if not rtext:
                 _log(job_id, "    → Đang nhận diện lời thoại của giọng mẫu...")
                 rtext = orch.transcribe_audio(ref_audio_path) or ""
             _log(job_id, "    → Đang tạo giọng CLONE bằng F5-TTS (có thể lâu, tuỳ độ dài & phần cứng)...")
-            dub_audio = orch.synthesize_clone_dub(dub_srt, ref_audio_path, rtext, work_dir)
+            dub_audio, clone_srt = orch.synthesize_clone_dub(dub_srt, ref_audio_path, rtext, work_dir)
+            if clone_srt:
+                ass_srt = clone_srt
+            stretch_video = True
             _log(job_id, "    ✓ Xong giọng clone")
+        elif tts_engine == "elevenlabs" and el:
+            _log(job_id, "    → Đang tạo giọng ElevenLabs (gọi 1 lần cả bài, chống lệch ngữ điệu)...")
+            dub_audio, el_srt = orch.synthesize_elevenlabs_dub(dub_srt, el[0], el[1], el[2], work_dir)
+            if el_srt:
+                ass_srt = el_srt
+            stretch_video = True
+            _log(job_id, "    ✓ Xong giọng ElevenLabs")
 
         _log(job_id, "[3/4] Đang tạo lại phụ đề đúng vị trí cho video này...")
         width, height = orch.probe_resolution(cleaned)
-        sub_box = None
-        if place_sub_in_region and sub_areas:
-            # Chọn ô TO NHẤT (theo diện tích) làm chỗ đặt sub — thường dải sub
-            # rộng hơn ô logo. sub_areas: (ymin, ymax, xmin, xmax).
-            sub_box = max(sub_areas, key=lambda a: (a[1] - a[0]) * (a[3] - a[2]))
-            _log(job_id, f"    → Đặt phụ đề mới vào ô đã khoanh {sub_box} (tự co cỡ chữ)")
+        if sub_box:
+            _log(job_id, f"    → Đặt phụ đề mới vào ô che sub {sub_box} (tự co cỡ chữ)")
         ass_path = orch.build_fixed_ass(
-            dub_srt, work_dir, width, height,
+            ass_srt, work_dir, width, height,
             bottom_pct=subtitle_bottom_pct, sub_box=sub_box,
         )
         _log(job_id, "✓ Xong bước 3/4")
 
         _log(job_id, "[4/4] Đang ghép video cuối cùng...")
         output_path = OUTPUT_DIR / f"{job_id}_{target_lang}.mp4"
-        orch.compose_final(cleaned, dub_audio, ass_path, output_path)
+        orch.compose_final(cleaned, dub_audio, ass_path, output_path, stretch_video=stretch_video)
 
         with JOBS_LOCK:
             JOBS[job_id]["status"] = "done"
@@ -168,11 +205,7 @@ def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_ro
             input_video.unlink(missing_ok=True)
         except Exception:
             pass
-        try:
-            if ref_audio_path:
-                Path(ref_audio_path).unlink(missing_ok=True)
-        except Exception:
-            pass
+        # KHÔNG xoá ref_audio_path: đó là file giọng trong thư viện (dùng lại nhiều lần).
 
 
 @app.get("/api/config")
@@ -185,7 +218,48 @@ def get_config():
         "inpaint_choices": INPAINT_CHOICES,
         "voices": voices_for_lang(cfg["target_lang"]),
         "subtitle_bottom_pct": cfg.get("subtitle_bottom_pct", 15),
+        "clone_voices": list(load_clone_voices().keys()),
     }
+
+
+@app.post("/api/clone-voices")
+async def add_clone_voice(name: str = Form(...), ref_audio: UploadFile = File(...)):
+    """Thêm 1 giọng clone mới: lưu file mẫu (convert wav mono 24k) + transcribe 1
+    lần, cất vào thư viện để chọn lại như preset."""
+    name = name.strip()
+    if not name:
+        return JSONResponse({"error": "Thiếu tên giọng"}, status_code=400)
+    voices = load_clone_voices()
+    slug = uuid.uuid4().hex[:8]
+    wav = CLONE_DIR / f"{slug}.wav"
+    raw = CLONE_DIR / f"{slug}_raw{Path(ref_audio.filename or '').suffix or '.m4a'}"
+    with raw.open("wb") as f:
+        shutil.copyfileobj(ref_audio.file, f)
+    # CẮT xuống ~14s (bỏ 1.5s đầu tránh nhạc/intro). F5 chỉ dùng ref ngắn ~10-15s;
+    # nếu để file dài (vài phút) F5 loạn -> sinh tiếng lặp vô nghĩa (lỗi đã gặp).
+    subprocess.run(
+        [orch.FFMPEG_BIN, "-y", "-ss", "1.5", "-t", "14", "-i", str(raw),
+         "-ac", "1", "-ar", "24000", str(wav)],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    raw.unlink(missing_ok=True)
+    text = orch.transcribe_audio(wav) or ""   # nhận diện lời thoại (chỉ đoạn 14s)
+    voices[name] = {"file": str(wav), "text": text}
+    save_clone_voices(voices)
+    return {"clone_voices": list(voices.keys())}
+
+
+@app.delete("/api/clone-voices/{name}")
+async def delete_clone_voice(name: str):
+    voices = load_clone_voices()
+    v = voices.pop(name, None)
+    if v:
+        try:
+            Path(v["file"]).unlink(missing_ok=True)
+        except Exception:
+            pass
+        save_clone_voices(voices)
+    return {"clone_voices": list(voices.keys())}
 
 
 @app.get("/api/voices")
@@ -231,9 +305,11 @@ async def run_pipeline(
     sub_areas: str = Form(""),
     subtitle_bottom_pct: int = Form(15),
     place_sub_in_region: bool = Form(False),
+    sub_box: str = Form(""),
     tts_engine: str = Form("edge"),
-    ref_text: str = Form(""),
-    ref_audio: UploadFile = File(None),
+    el_api_key: str = Form(""),
+    el_voice_id: str = Form(""),
+    el_model: str = Form("eleven_multilingual_v2"),
 ):
     job_id = uuid.uuid4().hex[:12]
     suffix = Path(video.filename or "input.mp4").suffix or ".mp4"
@@ -243,26 +319,31 @@ async def run_pipeline(
 
     parsed_areas = _parse_sub_areas(sub_areas)
     bottom_pct = max(0, min(int(subtitle_bottom_pct), 45))
+    # Khối "đặt sub" riêng (che sub cũ + sub mới đè lên). Nếu rỗng -> chỉ blur, sub ở đáy.
+    _pb = _parse_sub_areas(f"[{sub_box}]") if sub_box.strip() else []
+    parsed_box = _pb[0] if _pb else None
 
-    # Chế độ clone giọng: lưu file giọng mẫu, convert sang wav mono 24k (chuẩn F5).
+    # Chế độ clone giọng: voice_role là TÊN giọng đã lưu trong thư viện -> tra ra
+    # file mẫu + lời thoại (đã transcribe sẵn lúc thêm giọng), khỏi upload lại.
     ref_wav = None
-    if tts_engine == "f5clone" and ref_audio is not None and ref_audio.filename:
-        raw_ref = UPLOAD_DIR / f"{job_id}_ref{Path(ref_audio.filename).suffix or '.m4a'}"
-        with raw_ref.open("wb") as f:
-            shutil.copyfileobj(ref_audio.file, f)
-        ref_wav = UPLOAD_DIR / f"{job_id}_ref.wav"
-        subprocess.run(
-            [orch.FFMPEG_BIN, "-y", "-i", str(raw_ref), "-ac", "1", "-ar", "24000", str(ref_wav)],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        raw_ref.unlink(missing_ok=True)
+    ref_text = ""
+    if tts_engine == "f5clone":
+        v = load_clone_voices().get(voice_role)
+        if v and Path(v["file"]).exists():
+            ref_wav = v["file"]
+            ref_text = v.get("text", "")
+
+    # ElevenLabs: ghi API key + voice_id vào config pyvideotrans -> dùng tts_type 22.
+    el = None
+    if tts_engine == "elevenlabs" and el_api_key.strip() and el_voice_id.strip():
+        el = (el_api_key.strip(), el_voice_id.strip(), el_model.strip() or "eleven_multilingual_v2")
 
     JOBS[job_id] = {"logs": [], "status": "running", "result": None}
     thread = threading.Thread(
         target=_run_job,
         args=(job_id, saved_path, source_lang, target_lang, model_name, voice_role,
-              inpaint_mode, parsed_areas, bottom_pct, bool(place_sub_in_region),
-              tts_engine, str(ref_wav) if ref_wav else None, ref_text.strip().lower()),
+              inpaint_mode, parsed_areas, bottom_pct, parsed_box,
+              tts_engine, ref_wav, ref_text, el),
         daemon=True,
     )
     thread.start()

@@ -63,14 +63,25 @@ const els = {
   saveDefaultLink: document.getElementById("save-default-link"),
   cancelVideoBtn: document.getElementById("cancel-video-btn"),
   subtitleBottomPct: document.getElementById("subtitle_bottom_pct"),
-  placeSubInRegion: document.getElementById("place_sub_in_region"),
+  modeSubBtn: document.getElementById("mode-sub-btn"),
+  modeLogoBtn: document.getElementById("mode-logo-btn"),
   ttsEngine: document.getElementById("tts_engine"),
   rowVoiceRole: document.getElementById("row-voice-role"),
+  voiceRoleLabel: document.getElementById("voice-role-label"),
   clonePanel: document.getElementById("clone-panel"),
-  refAudioBtn: document.getElementById("ref-audio-btn"),
-  refAudioInput: document.getElementById("ref-audio-input"),
-  refAudioName: document.getElementById("ref-audio-name"),
-  refText: document.getElementById("ref-text"),
+  elPanel: document.getElementById("el-panel"),
+  elApiKey: document.getElementById("el-api-key"),
+  elVoiceId: document.getElementById("el-voice-id"),
+  elModel: document.getElementById("el-model"),
+  addCloneBtn: document.getElementById("add-clone-btn"),
+  delCloneBtn: document.getElementById("del-clone-btn"),
+  addCloneForm: document.getElementById("add-clone-form"),
+  newCloneName: document.getElementById("new-clone-name"),
+  newCloneFileBtn: document.getElementById("new-clone-file-btn"),
+  newCloneFile: document.getElementById("new-clone-file"),
+  newCloneFileName: document.getElementById("new-clone-file-name"),
+  saveCloneBtn: document.getElementById("save-clone-btn"),
+  cloneSaveStatus: document.getElementById("clone-save-status"),
   regionPanel: document.getElementById("region-panel"),
   regionStartBtn: document.getElementById("region-start-btn"),
   regionCount: document.getElementById("region-count"),
@@ -83,19 +94,86 @@ const els = {
 
 let selectedFile = null;
 let cfgCache = null;
-let refAudioFile = null;
+let cloneVoices = [];
+let newCloneFileObj = null;
+let edgeVoices = [];
 
 // ---- Chuyển đổi Edge-TTS <-> Clone giọng ----
 function updateTtsEngine() {
-  const isClone = els.ttsEngine.value === "f5clone";
-  els.rowVoiceRole.style.display = isClone ? "none" : "";
+  const eng = els.ttsEngine.value;
+  const isClone = eng === "f5clone";
+  const isEl = eng === "elevenlabs";
   els.clonePanel.style.display = isClone ? "block" : "none";
+  els.elPanel.style.display = isEl ? "block" : "none";
+  els.rowVoiceRole.style.display = isEl ? "none" : "";  // EL dùng Voice ID, ẩn dropdown giọng
+  els.voiceRoleLabel.textContent = isClone ? "Giọng clone (đã lưu)" : "Giọng đọc (Edge-TTS)";
+  if (isEl) return;
+  if (isClone) {
+    if (cloneVoices.length) {
+      fillSelect(els.voiceRole, cloneVoices, cloneVoices[0]);
+    } else {
+      els.voiceRole.innerHTML = '<option value="">(chưa có giọng — bấm "Thêm giọng clone mới")</option>';
+    }
+  } else {
+    fillSelect(els.voiceRole, edgeVoices, edgeVoices[0]);
+  }
 }
 els.ttsEngine.addEventListener("change", updateTtsEngine);
-els.refAudioBtn.addEventListener("click", () => els.refAudioInput.click());
-els.refAudioInput.addEventListener("change", () => {
-  refAudioFile = els.refAudioInput.files[0] || null;
-  els.refAudioName.textContent = refAudioFile ? `✓ ${refAudioFile.name}` : "";
+
+// Nhớ thông tin ElevenLabs trong trình duyệt (khỏi nhập lại mỗi lần)
+["elApiKey", "elVoiceId", "elModel"].forEach((k) => {
+  const el = els[k], sk = "mvl_" + k;
+  const saved = localStorage.getItem(sk);
+  if (saved != null) el.value = saved;
+  const save = () => localStorage.setItem(sk, el.value);
+  el.addEventListener("change", save);
+  el.addEventListener("input", save);
+});
+
+els.addCloneBtn.addEventListener("click", () => {
+  els.addCloneForm.style.display = els.addCloneForm.style.display === "none" ? "block" : "none";
+});
+els.newCloneFileBtn.addEventListener("click", () => els.newCloneFile.click());
+els.newCloneFile.addEventListener("change", () => {
+  newCloneFileObj = els.newCloneFile.files[0] || null;
+  els.newCloneFileName.textContent = newCloneFileObj ? `✓ ${newCloneFileObj.name}` : "";
+});
+els.saveCloneBtn.addEventListener("click", async () => {
+  const name = (els.newCloneName.value || "").trim();
+  if (!name) { els.cloneSaveStatus.textContent = "Chưa đặt tên"; return; }
+  if (!newCloneFileObj) { els.cloneSaveStatus.textContent = "Chưa chọn file"; return; }
+  els.cloneSaveStatus.textContent = "Đang lưu + nhận diện lời thoại...";
+  els.saveCloneBtn.disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append("name", name);
+    fd.append("ref_audio", newCloneFileObj);
+    const res = await fetch("/api/clone-voices", { method: "POST", body: fd });
+    const data = await res.json();
+    if (data.error) { els.cloneSaveStatus.textContent = data.error; }
+    else {
+      cloneVoices = data.clone_voices || [];
+      els.cloneSaveStatus.textContent = "✓ Đã lưu";
+      els.newCloneName.value = "";
+      newCloneFileObj = null;
+      els.newCloneFileName.textContent = "";
+      els.addCloneForm.style.display = "none";
+      fillSelect(els.voiceRole, cloneVoices, name);
+    }
+  } catch (e) {
+    els.cloneSaveStatus.textContent = "Lỗi: " + e;
+  } finally {
+    els.saveCloneBtn.disabled = false;
+  }
+});
+els.delCloneBtn.addEventListener("click", async () => {
+  const name = els.voiceRole.value;
+  if (!name || els.ttsEngine.value !== "f5clone") return;
+  if (!confirm(`Xoá giọng "${name}"?`)) return;
+  const res = await fetch(`/api/clone-voices/${encodeURIComponent(name)}`, { method: "DELETE" });
+  const data = await res.json();
+  cloneVoices = data.clone_voices || [];
+  updateTtsEngine();
 });
 
 // ---- Khoanh vùng xoá sub/logo (toạ độ theo PIXEL GỐC của video) ----
@@ -104,6 +182,13 @@ let regionFrame = null;  // canvas offscreen giữ frame đã chụp để vẽ 
 let drawing = false;
 let dragStart = null;
 let dragCur = null;
+let regionType = "sub";  // 'sub' = che sub + đặt sub mới; 'logo' = chỉ blur
+
+function setRegionType(t) {
+  regionType = t;
+  els.modeSubBtn.classList.toggle("ghost", t !== "sub");
+  els.modeLogoBtn.classList.toggle("ghost", t !== "logo");
+}
 
 function fillSelect(select, options, value) {
   select.innerHTML = "";
@@ -125,15 +210,18 @@ async function loadConfig() {
   fillSelect(els.targetLang, data.lang_choices, data.config.target_lang);
   fillSelect(els.modelName, data.model_choices, data.config.model_name);
   fillSelect(els.inpaintMode, data.inpaint_choices, data.config.inpaint_mode);
-  fillSelect(els.voiceRole, data.voices, data.config.voice_role);
+  edgeVoices = data.voices || [];
+  cloneVoices = data.clone_voices || [];
   els.subtitleBottomPct.value = data.subtitle_bottom_pct ?? data.config.subtitle_bottom_pct ?? 15;
+  updateTtsEngine();  // populate dropdown giọng đúng theo engine đang chọn
 }
 loadConfig();
 
 els.targetLang.addEventListener("change", async () => {
   const res = await fetch(`/api/voices?lang=${encodeURIComponent(els.targetLang.value)}`);
   const data = await res.json();
-  fillSelect(els.voiceRole, data.voices, data.voices[0]);
+  edgeVoices = data.voices || [];
+  if (els.ttsEngine.value !== "f5clone") fillSelect(els.voiceRole, edgeVoices, edgeVoices[0]);
 });
 
 function showPreview(file) {
@@ -203,8 +291,11 @@ function redrawRegions(preview) {
     ctx.fillStyle = fill; ctx.fillRect(x, y, w, h);
     ctx.lineWidth = lw; ctx.strokeStyle = stroke; ctx.strokeRect(x, y, w, h);
   };
-  subAreas.forEach((b) => drawBox(b, "#38bdf8", "rgba(56,189,248,0.22)"));
-  if (preview) drawBox(preview, "#f59e0b", "rgba(245,158,11,0.22)");
+  subAreas.forEach((b) => b.type === "logo"
+    ? drawBox(b, "#f59e0b", "rgba(245,158,11,0.22)")
+    : drawBox(b, "#38bdf8", "rgba(56,189,248,0.22)"));
+  if (preview) drawBox(preview, regionType === "logo" ? "#f59e0b" : "#38bdf8",
+                       regionType === "logo" ? "rgba(245,158,11,0.28)" : "rgba(56,189,248,0.28)");
 }
 
 function enterRegionMode() {
@@ -234,6 +325,8 @@ function exitRegionMode() {
     : "✏️ Khoanh vùng xoá sub/logo cũ";
 }
 
+els.modeSubBtn.addEventListener("click", () => setRegionType("sub"));
+els.modeLogoBtn.addEventListener("click", () => setRegionType("logo"));
 els.regionStartBtn.addEventListener("click", enterRegionMode);
 els.regionDoneBtn.addEventListener("click", exitRegionMode);
 els.regionUndoBtn.addEventListener("click", () => { subAreas.pop(); redrawRegions(); updateRegionCount(); });
@@ -259,7 +352,7 @@ els.regionCanvas.addEventListener("pointerup", () => {
     xmax: Math.round(Math.max(dragStart.x, dragCur.x)),
     ymax: Math.round(Math.max(dragStart.y, dragCur.y)),
   };
-  if (b.xmax - b.xmin >= 4 && b.ymax - b.ymin >= 4) subAreas.push(b);
+  if (b.xmax - b.xmin >= 4 && b.ymax - b.ymin >= 4) { b.type = regionType; subAreas.push(b); }
   dragStart = dragCur = null;
   redrawRegions();
   updateRegionCount();
@@ -310,16 +403,28 @@ els.runBtn.addEventListener("click", async () => {
   form.append("voice_role", els.voiceRole.value);
   form.append("inpaint_mode", els.inpaintMode.value);
   form.append("subtitle_bottom_pct", els.subtitleBottomPct.value || "15");
-  form.append("place_sub_in_region", els.placeSubInRegion.checked ? "true" : "false");
+  // Khối CHE SUB to nhất (nếu có) -> nơi đặt sub mới. Các khối còn lại chỉ blur.
+  const subBoxes = subAreas.filter((b) => b.type !== "logo");
+  if (subBoxes.length) {
+    const sb = subBoxes.reduce((a, b) =>
+      (b.xmax - b.xmin) * (b.ymax - b.ymin) > (a.xmax - a.xmin) * (a.ymax - a.ymin) ? b : a);
+    form.append("sub_box", JSON.stringify({ ymin: sb.ymin, ymax: sb.ymax, xmin: sb.xmin, xmax: sb.xmax }));
+  }
   form.append("tts_engine", els.ttsEngine.value);
-  if (els.ttsEngine.value === "f5clone") {
-    if (!refAudioFile) {
-      appendLog("Bạn chọn Clone giọng nhưng chưa chọn file giọng mẫu.");
+  if (els.ttsEngine.value === "f5clone" && !els.voiceRole.value) {
+    appendLog('Bạn chọn Clone giọng nhưng chưa có giọng nào. Bấm "Thêm giọng clone mới" để tạo trước.');
+    setRunning(false);
+    return;
+  }
+  if (els.ttsEngine.value === "elevenlabs") {
+    if (!els.elApiKey.value.trim() || !els.elVoiceId.value.trim()) {
+      appendLog("Bạn chọn ElevenLabs nhưng chưa nhập API key hoặc Voice ID.");
       setRunning(false);
       return;
     }
-    form.append("ref_audio", refAudioFile);
-    form.append("ref_text", els.refText.value || "");
+    form.append("el_api_key", els.elApiKey.value.trim());
+    form.append("el_voice_id", els.elVoiceId.value.trim());
+    form.append("el_model", els.elModel.value);
   }
   // VSR nhận theo thứ tự ymin,ymax,xmin,xmax
   form.append("sub_areas", JSON.stringify(subAreas.map((b) => ({
