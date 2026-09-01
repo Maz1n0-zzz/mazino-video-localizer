@@ -14,6 +14,10 @@ DEFAULTS = {
     "inpaint_mode": "lama-auto",
     # Khoảng cách phụ đề mới tới đáy video (% chiều cao) — vùng an toàn TikTok.
     "subtitle_bottom_pct": 15,
+    # Âm lượng TIẾNG GỐC giữ lại trong video cuối, tính theo % so với ban đầu.
+    # 0 = tắt hẳn tiếng gốc (hành vi cũ), 100 = giữ nguyên. Mặc định 30% để nhạc
+    # nền/tiếng động hiện trường còn nghe được nhưng không lấn giọng dub.
+    "original_volume_pct": 30,
 }
 
 

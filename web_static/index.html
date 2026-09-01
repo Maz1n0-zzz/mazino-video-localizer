@@ -138,6 +138,13 @@
           <div class="opt-label"><span class="ic" id="icon-caption"></span><span>Phụ đề cách đáy (%)</span></div>
           <input type="number" id="subtitle_bottom_pct" class="opt-pill" min="0" max="45" step="1" value="15">
         </div>
+        <div class="opt-row">
+          <div class="opt-label"><span class="ic" id="icon-volume"></span><span>Âm lượng tiếng gốc (%)</span></div>
+          <div class="opt-pill slider-pill">
+            <input type="range" id="original_volume_pct" min="0" max="100" step="5" value="30">
+            <span class="slider-val" id="original-volume-val">30%</span>
+          </div>
+        </div>
       </div>
 
       <button id="run-btn" class="run-btn"><span class="ic" id="icon-play"></span>Chạy pipeline</button>

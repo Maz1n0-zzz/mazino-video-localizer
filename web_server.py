@@ -113,7 +113,7 @@ def _log(job_id, msg):
 
 def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_role,
              inpaint_mode, sub_areas, subtitle_bottom_pct, sub_box,
-             tts_engine, ref_audio_path, ref_text, el=None):
+             tts_engine, ref_audio_path, ref_text, el=None, original_volume_pct=30):
     work_dir = OUTPUT_DIR / f"_work_{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -185,7 +185,8 @@ def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_ro
 
         _log(job_id, "[4/4] Đang ghép video cuối cùng...")
         output_path = OUTPUT_DIR / f"{job_id}_{target_lang}.mp4"
-        orch.compose_final(cleaned, dub_audio, ass_path, output_path, stretch_video=stretch_video)
+        orch.compose_final(cleaned, dub_audio, ass_path, output_path, stretch_video=stretch_video,
+                           original_video=input_video, original_volume_pct=original_volume_pct)
 
         with JOBS_LOCK:
             JOBS[job_id]["status"] = "done"
@@ -218,6 +219,7 @@ def get_config():
         "inpaint_choices": INPAINT_CHOICES,
         "voices": voices_for_lang(cfg["target_lang"]),
         "subtitle_bottom_pct": cfg.get("subtitle_bottom_pct", 15),
+        "original_volume_pct": cfg.get("original_volume_pct", 30),
         "clone_voices": list(load_clone_voices().keys()),
     }
 
@@ -304,6 +306,7 @@ async def run_pipeline(
     inpaint_mode: str = Form(...),
     sub_areas: str = Form(""),
     subtitle_bottom_pct: int = Form(15),
+    original_volume_pct: int = Form(30),
     place_sub_in_region: bool = Form(False),
     sub_box: str = Form(""),
     tts_engine: str = Form("edge"),
@@ -319,6 +322,7 @@ async def run_pipeline(
 
     parsed_areas = _parse_sub_areas(sub_areas)
     bottom_pct = max(0, min(int(subtitle_bottom_pct), 45))
+    orig_vol = max(0, min(int(original_volume_pct), 100))
     # Khối "đặt sub" riêng (che sub cũ + sub mới đè lên). Nếu rỗng -> chỉ blur, sub ở đáy.
     _pb = _parse_sub_areas(f"[{sub_box}]") if sub_box.strip() else []
     parsed_box = _pb[0] if _pb else None
@@ -343,7 +347,7 @@ async def run_pipeline(
         target=_run_job,
         args=(job_id, saved_path, source_lang, target_lang, model_name, voice_role,
               inpaint_mode, parsed_areas, bottom_pct, parsed_box,
-              tts_engine, ref_wav, ref_text, el),
+              tts_engine, ref_wav, ref_text, el, orig_vol),
         daemon=True,
     )
     thread.start()

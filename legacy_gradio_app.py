@@ -359,7 +359,7 @@ def run_pipeline(video_path, source_lang, target_lang, model_name, voice_role, i
 
         yield log("[4/4] Đang ghép video cuối cùng..."), None, None
         output_path = OUTPUT_DIR / f"{input_video.stem}_{target_lang}.mp4"
-        orch.compose_final(cleaned, dub_audio, ass_path, output_path)
+        orch.compose_final(cleaned, dub_audio, ass_path, output_path, original_video=input_video)
         yield log(f"✓ Hoàn tất! File: {output_path}"), str(output_path), str(output_path)
     except orch.PipelineStageError as e:
         yield log(f"[LỖI ở bước: {e.stage}]\n{e.detail}"), None, None

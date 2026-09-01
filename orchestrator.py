@@ -390,28 +390,139 @@ def _media_duration(path):
         return 0.0
 
 
-def compose_final(cleaned_video, dub_audio, ass_path, output_path, stretch_video=False):
-    """Ghep: video da xoa sub cu (khong lay audio goc) + audio dub moi + sub moi dung vi tri.
+def _has_audio_stream(path):
+    """True nếu file có ít nhất 1 audio stream.
 
+    ffprobe lỗi -> False (an toàn: coi như không có tiếng gốc, video cuối vẫn ra
+    được với mỗi giọng dub thay vì hỏng cả pipeline).
+    """
+    try:
+        out = subprocess.run(
+            [FFPROBE_BIN, "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
+            check=True, capture_output=True, text=True,
+        )
+        return bool(out.stdout.strip())
+    except Exception:
+        return False
+
+
+def _audio_channels(path):
+    """Số kênh của audio stream đầu tiên. ffprobe lỗi -> 0 (không biết)."""
+    try:
+        out = subprocess.run(
+            [FFPROBE_BIN, "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=channels", "-of", "csv=p=0", str(path)],
+            check=True, capture_output=True, text=True,
+        )
+        return int(out.stdout.strip().splitlines()[0])
+    except Exception:
+        return 0
+
+
+def _to_stereo(path):
+    """Filter đưa 1 nhánh audio về stereo mà KHÔNG đổi độ to nghe được.
+
+    Mono thì nhân đôi kênh giữ NGUYÊN biên độ (pan), vì trình phát vốn phát track
+    mono ra cả 2 loa ở biên độ đầy đủ. Để amix tự upmix thì nó hạ -3 dB mỗi kênh
+    -> giọng dub (gần như luôn mono) nghe nhỏ hơn bản chưa trộn đúng 3 dB.
+    """
+    if _audio_channels(path) == 1:
+        return "pan=stereo|c0=c0|c1=c0"
+    return "aformat=channel_layouts=stereo"
+
+
+def _atempo_chain(factor):
+    """Chuỗi filter atempo đổi tốc độ audio theo `factor` (0.5 = chậm còn 1 nửa).
+
+    Mỗi atempo chỉ nhận 0.5-2.0 nên factor ngoài khoảng đó phải chia thành nhiều
+    bước nhân dồn (0.25 -> atempo=0.5,atempo=0.5).
+    """
+    steps = []
+    f = float(factor)
+    while f < 0.5:
+        steps.append(0.5)
+        f /= 0.5
+    while f > 2.0:
+        steps.append(2.0)
+        f /= 2.0
+    steps.append(f)
+    return ",".join(f"atempo={s:.6f}" for s in steps)
+
+
+def compose_final(cleaned_video, dub_audio, ass_path, output_path, stretch_video=False,
+                   original_video=None, original_volume_pct=None):
+    """Ghép: video đã xoá sub cũ + audio dub mới + TIẾNG GỐC hạ nhỏ + sub mới đúng vị trí.
+
+    original_volume_pct: âm lượng tiếng gốc giữ lại, tính theo % so với ban đầu.
+        0 = tắt hẳn tiếng gốc (hành vi cũ). None -> lấy từ config.
+    original_video: file video gốc, dùng làm nguồn tiếng nền DỰ PHÒNG. Cần có vì
+        VSR ghép audio lại bằng `-acodec copy` và nuốt lỗi im lặng (bắt exception
+        rồi return — vendor/video-subtitle-remover/backend/main.py:470), nên
+        cleaned.mp4 có thể ra mà không còn tiếng.
     stretch_video: nếu True và dub dài hơn video, KÉO GIÃN video cho khớp độ dài
     dub (setpts) — dùng cho giọng clone đọc tự nhiên (dài hơn timing gốc) để giọng
     không bị cắt/không phải nén nhanh. Phụ đề (.ass) đã theo timing của dub nên khớp.
     """
     stage = "Ghép video cuối"
+
+    if original_volume_pct is None:
+        original_volume_pct = load_config().get("original_volume_pct", 30)
+    try:
+        volume = max(0.0, min(float(original_volume_pct), 100.0)) / 100.0
+    except (TypeError, ValueError):
+        volume = 0.30
+
     vf = f"subtitles=filename='{ass_path.name}'"
+    speed_factor = 1.0
     if stretch_video:
         vdur = _media_duration(cleaned_video)
         adur = _media_duration(dub_audio)
         if vdur > 0 and adur > vdur * 1.02:
-            factor = adur / vdur
+            speed_factor = adur / vdur
             # setpts kéo giãn thời gian video (chậm lại) cho bằng độ dài dub.
-            vf = f"setpts={factor:.4f}*PTS,{vf}"
+            vf = f"setpts={speed_factor:.4f}*PTS,{vf}"
+
+    # Nguồn tiếng gốc: ưu tiên video đã xoá sub (cùng timeline, khỏi thêm input);
+    # nếu VSR làm rớt audio thì quay về file gốc người dùng đưa vào.
+    extra_inputs = []
+    bg_idx = None
+    if volume > 0:
+        if _has_audio_stream(cleaned_video):
+            bg_idx = 0
+        elif original_video and Path(original_video).exists() and _has_audio_stream(original_video):
+            extra_inputs = ["-i", str(original_video)]
+            bg_idx = 2
+
+    if bg_idx is None:
+        # Không có tiếng gốc để trộn (video câm, hoặc người dùng đặt 0%) -> chỉ dub.
+        filter_complex = f"[0:v]{vf}[vout]"
+        audio_map = "1:a"
+    else:
+        bg_path = original_video if bg_idx == 2 else cleaned_video
+        bg_chain = [_to_stereo(bg_path)]
+        if speed_factor > 1.0:
+            # Video bị kéo giãn -> tiếng gốc phải giãn theo đúng tỉ lệ, không thì
+            # nhạc nền/tiếng động lệch dần so với hình.
+            bg_chain.append(_atempo_chain(1.0 / speed_factor))
+        bg_chain.append(f"volume={volume:.4f}")
+        filter_complex = (
+            f"[0:v]{vf}[vout];"
+            f"[{bg_idx}:a]{','.join(bg_chain)}[bg];"
+            f"[1:a]{_to_stereo(dub_audio)}[dub];"
+            # normalize=0 BẮT BUỘC: mặc định amix chia âm lượng cho số input ->
+            # giọng dub sẽ bị nhỏ đi một nửa dù không ai hạ nó.
+            f"[bg][dub]amix=inputs=2:duration=longest:normalize=0[aout]"
+        )
+        audio_map = "[aout]"
+
     run([
         FFMPEG_BIN, "-y",
         "-i", str(cleaned_video),
         "-i", str(dub_audio),
-        "-filter_complex", f"[0:v]{vf}[vout]",
-        "-map", "[vout]", "-map", "1:a",
+        *extra_inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[vout]", "-map", audio_map,
         "-c:v", "libx264", "-preset", "medium", "-crf", "20",
         "-c:a", "aac",
         "-shortest", "-movflags", "+faststart",
@@ -437,6 +548,9 @@ def main():
                               "Không truyền -> bỏ qua bước xoá sub.")
     parser.add_argument("--subtitle-bottom-pct", type=int, default=int(cfg.get("subtitle_bottom_pct", 15)),
                          help="Khoảng cách phụ đề mới tới đáy video, tính theo %% chiều cao (mặc định 15).")
+    parser.add_argument("--original-volume", type=int, default=int(cfg.get("original_volume_pct", 30)),
+                         help="Âm lượng tiếng gốc giữ lại trong video cuối, %% so với ban đầu "
+                              "(0 = tắt hẳn tiếng gốc, mặc định 30).")
     parser.add_argument("--sub-in-region", action="store_true",
                          help="Đặt phụ đề mới vào ô --sub-area to nhất (đè lên chỗ sub cũ) thay vì ở đáy.")
     parser.add_argument("--output", default=None, help="File output cuối (mặc định: <input>_<target-lang>.mp4)")
@@ -449,6 +563,7 @@ def main():
         save_config(
             source_lang=args.source_lang, target_lang=args.target_lang,
             model_name=args.model, voice_role=args.voice, inpaint_mode=args.inpaint_mode,
+            original_volume_pct=args.original_volume,
         )
         print(f"[config] Đã lưu mặc định mới vào {PROJECT_ROOT / 'config.json'}")
 
@@ -484,7 +599,8 @@ def main():
                                     bottom_pct=args.subtitle_bottom_pct, sub_box=sub_box)
 
         print("== Bước 4/4: ghép video sạch + audio dub + sub mới ==")
-        compose_final(cleaned_video, dub_audio, ass_path, output_path)
+        compose_final(cleaned_video, dub_audio, ass_path, output_path,
+                       original_video=input_video, original_volume_pct=args.original_volume)
 
         print(f"\n[Done] Output: {output_path}")
     except PipelineStageError as e:

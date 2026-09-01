@@ -13,6 +13,7 @@ const ICONS = {
   cloud: '<path d="M8 17l4 4 4-4"/><path d="M12 12v9"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/>',
   clapper: '<path d="M20 6H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2z"/><path d="M2 8l3-4h3l-3 4M8 8l3-4h3l-3 4M14 8l3-4h3l-3 4"/>',
   caption: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 12h4M7 15h2M14 12h3M14 15h3"/>',
+  volume: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>',
   mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>',
 };
 
@@ -40,6 +41,7 @@ setIcon("icon-upload", "upload");
 setIcon("icon-cloud", "cloud");
 setIcon("icon-clapper", "clapper");
 setIcon("icon-caption", "caption");
+setIcon("icon-volume", "volume");
 setIcon("icon-mic", "mic");
 
 const els = {
@@ -63,6 +65,8 @@ const els = {
   saveDefaultLink: document.getElementById("save-default-link"),
   cancelVideoBtn: document.getElementById("cancel-video-btn"),
   subtitleBottomPct: document.getElementById("subtitle_bottom_pct"),
+  originalVolumePct: document.getElementById("original_volume_pct"),
+  originalVolumeVal: document.getElementById("original-volume-val"),
   modeSubBtn: document.getElementById("mode-sub-btn"),
   modeLogoBtn: document.getElementById("mode-logo-btn"),
   ttsEngine: document.getElementById("tts_engine"),
@@ -202,6 +206,12 @@ function fillSelect(select, options, value) {
   });
 }
 
+function syncOriginalVolumeLabel() {
+  const v = parseInt(els.originalVolumePct.value || "0", 10);
+  els.originalVolumeVal.textContent = v === 0 ? "Tắt" : `${v}%`;
+}
+els.originalVolumePct.addEventListener("input", syncOriginalVolumeLabel);
+
 async function loadConfig() {
   const res = await fetch("/api/config");
   const data = await res.json();
@@ -213,6 +223,8 @@ async function loadConfig() {
   edgeVoices = data.voices || [];
   cloneVoices = data.clone_voices || [];
   els.subtitleBottomPct.value = data.subtitle_bottom_pct ?? data.config.subtitle_bottom_pct ?? 15;
+  els.originalVolumePct.value = data.original_volume_pct ?? data.config.original_volume_pct ?? 30;
+  syncOriginalVolumeLabel();
   updateTtsEngine();  // populate dropdown giọng đúng theo engine đang chọn
 }
 loadConfig();
@@ -403,6 +415,7 @@ els.runBtn.addEventListener("click", async () => {
   form.append("voice_role", els.voiceRole.value);
   form.append("inpaint_mode", els.inpaintMode.value);
   form.append("subtitle_bottom_pct", els.subtitleBottomPct.value || "15");
+  form.append("original_volume_pct", els.originalVolumePct.value || "30");
   // Khối CHE SUB to nhất (nếu có) -> nơi đặt sub mới. Các khối còn lại chỉ blur.
   const subBoxes = subAreas.filter((b) => b.type !== "logo");
   if (subBoxes.length) {
@@ -475,11 +488,12 @@ els.saveDefaultLink.addEventListener("click", async (e) => {
     voice_role: els.voiceRole.value,
     inpaint_mode: els.inpaintMode.value,
     subtitle_bottom_pct: parseInt(els.subtitleBottomPct.value || "15", 10),
+    original_volume_pct: parseInt(els.originalVolumePct.value || "30", 10),
   };
   await fetch("/api/config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  appendLog(`✓ Đã lưu làm mặc định: ${payload.source_lang} → ${payload.target_lang}, model=${payload.model_name}, voice=${payload.voice_role}, inpaint=${payload.inpaint_mode}, sub cách đáy=${payload.subtitle_bottom_pct}%`);
+  appendLog(`✓ Đã lưu làm mặc định: ${payload.source_lang} → ${payload.target_lang}, model=${payload.model_name}, voice=${payload.voice_role}, inpaint=${payload.inpaint_mode}, sub cách đáy=${payload.subtitle_bottom_pct}%, tiếng gốc=${payload.original_volume_pct}%`);
 });
