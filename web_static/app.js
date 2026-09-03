@@ -225,6 +225,14 @@ async function loadConfig() {
   els.subtitleBottomPct.value = data.subtitle_bottom_pct ?? data.config.subtitle_bottom_pct ?? 15;
   els.originalVolumePct.value = data.original_volume_pct ?? data.config.original_volume_pct ?? 30;
   syncOriginalVolumeLabel();
+  // Clone giọng F5 cần venv + model riêng, bản Windows chưa đóng gói -> ghi rõ
+  // vào nhãn thay vì để người dùng chọn xong mới ăn lỗi ở giữa pipeline.
+  const f5opt = els.ttsEngine.querySelector('option[value="f5clone"]');
+  if (f5opt) {
+    f5opt.textContent = data.f5_available
+      ? "Clone giọng từ file mẫu (F5-TTS)"
+      : "Clone giọng (F5-TTS) — chưa cài trên bản này";
+  }
   updateTtsEngine();  // populate dropdown giọng đúng theo engine đang chọn
 }
 loadConfig();

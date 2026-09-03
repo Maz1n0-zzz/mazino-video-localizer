@@ -81,6 +81,20 @@ MODEL_SIZES = {
 }
 
 
+def _f5_available():
+    """F5 clone giọng chỉ chạy được khi có sẵn venv f5env + file trọng số.
+
+    Bản Windows chưa đóng gói phần này (cần torch + model, ~+3-4GB — HANDOFF.md
+    đã hoãn), nên phải nói rõ ngay trên dropdown thay vì để người dùng chọn xong
+    mới báo lỗi. Kiểm ĐÚNG hai thứ mà synthesize_clone_dub kiểm (orchestrator.py
+    dòng 301 và 304) để nhãn không bao giờ lệch với thực tế lúc chạy.
+    """
+    try:
+        return Path(orch.F5_PY).exists() and (orch.F5_MODEL_DIR / "model_last.pt").exists()
+    except Exception:
+        return False
+
+
 def _whisper_model_dir(name):
     """Thư mục model theo layout mà faster-whisper/Inno Setup dựng ra. FROZEN thì
     PVT_DIR = <install_dir>/pyvideotrans, khớp DestDir trong setup.iss [Files]."""
@@ -254,6 +268,7 @@ def get_config():
         "voices": voices_for_lang(cfg["target_lang"]),
         "subtitle_bottom_pct": cfg.get("subtitle_bottom_pct", 15),
         "original_volume_pct": cfg.get("original_volume_pct", 30),
+        "f5_available": _f5_available(),
         "clone_voices": list(load_clone_voices().keys()),
     }
 
