@@ -68,6 +68,40 @@ LANG_CHOICES = [
     ("pt", "Tiếng Bồ Đào Nha"),
 ]
 MODEL_CHOICES = ["tiny", "base", "small", "medium", "large-v3"]
+# Bản cài Windows CHỈ đóng gói sẵn "medium" (workflow build, bước "Pre-download
+# faster-whisper medium model"). Chọn model khác thì pyvideotrans phải tự tải từ
+# huggingface lúc chạy — mất mạng là ra lỗi "The model download failed" không nói
+# rõ nguyên nhân. Nên ghi thẳng vào nhãn dropdown thay vì để người dùng đâm vào.
+MODEL_SIZES = {
+    # Đo trực tiếp từ model.bin trên đĩa. tiny/base chưa có bản đầy đủ để đo nên
+    # không ghi số — thà không nói còn hơn nói sai.
+    "small": "~460 MB",
+    "medium": "~1.4 GB",
+    "large-v3": "~2.9 GB",
+}
+
+
+def _whisper_model_dir(name):
+    """Thư mục model theo layout mà faster-whisper/Inno Setup dựng ra. FROZEN thì
+    PVT_DIR = <install_dir>/pyvideotrans, khớp DestDir trong setup.iss [Files]."""
+    return orch.PVT_DIR / "models" / f"models--Systran--faster-whisper-{name}"
+
+
+def model_choices():
+    """Nhãn động cho dropdown: model nào đã nằm trên máy thì ghi "có sẵn".
+
+    Kiểm `model.bin` chứ không chỉ kiểm thư mục — thư mục tải dở vẫn tồn tại
+    (chỉ có config.json/tokenizer.json) mà chạy là hỏng.
+    """
+    out = []
+    for name in MODEL_CHOICES:
+        if (_whisper_model_dir(name) / "model.bin").exists():
+            out.append((name, f"{name} — có sẵn trong máy, chạy offline"))
+        else:
+            size = MODEL_SIZES.get(name)
+            note = f"cần mạng, tải {size} lần đầu" if size else "cần mạng, tải lần đầu"
+            out.append((name, f"{name} — {note}"))
+    return out
 # Chỉ liệt kê các mode thực sự chạy được với bộ model đã đóng gói. sttn-det/
 # lama/propainter/opencv (gốc) đều cần model OCR (PP-OCRv5) để tự dò vùng —
 # KHÔNG được bundle nên sẽ lỗi; bỏ khỏi UI. 3 mode dưới đây áp thẳng vào vùng
@@ -215,7 +249,7 @@ def get_config():
     return {
         "config": cfg,
         "lang_choices": LANG_CHOICES,
-        "model_choices": MODEL_CHOICES,
+        "model_choices": model_choices(),
         "inpaint_choices": INPAINT_CHOICES,
         "voices": voices_for_lang(cfg["target_lang"]),
         "subtitle_bottom_pct": cfg.get("subtitle_bottom_pct", 15),
