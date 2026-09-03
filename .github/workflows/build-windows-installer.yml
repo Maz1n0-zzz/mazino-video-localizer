@@ -69,7 +69,10 @@ jobs:
           # huggingface_hub ghim dung ban pyvideotrans dang dung (xem
           # vendor/pyvideotrans/pyproject.toml) de dam bao API snapshot_download
           # (tham so local_dir_use_symlinks) hoat dong giong nhu code goc.
-          uv pip install --python web_env\Scripts\python.exe fastapi "uvicorn[standard]" python-multipart edge-tts pyinstaller "huggingface_hub==1.10.0"
+          # numpy + soundfile: el_clone.py (dub ElevenLabs) chay TRONG tien trinh
+          # web_server khi dong goi -- ban frozen khong co python.exe roi de chay
+          # no nhu script. Xem orchestrator.synthesize_elevenlabs_dub.
+          uv pip install --python web_env\Scripts\python.exe fastapi "uvicorn[standard]" python-multipart edge-tts pyinstaller "huggingface_hub==1.10.0" numpy soundfile
 
       - name: Build web_server.exe
         shell: pwsh

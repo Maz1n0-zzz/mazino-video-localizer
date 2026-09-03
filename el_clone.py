@@ -77,13 +77,15 @@ def spoken_tags_ok(text, chars, st, et):
     return True
 
 
-def main():
+def main(argv=None):
+    """argv=None -> doc sys.argv (chay CLI). Truyen list -> goi duoc TRONG tien
+    trinh, khong can python.exe ben ngoai (ban Windows dong goi khong co)."""
     ap=argparse.ArgumentParser()
     for k in ("srt","out","api-key","voice-id"): ap.add_argument("--"+k, required=True)
     ap.add_argument("--out-srt", default="")
     ap.add_argument("--model", default="eleven_v3")
     ap.add_argument("--speed", type=float, default=1.0)
-    a=ap.parse_args()
+    a=ap.parse_args(argv)
 
     segs=parse_srt(Path(a.srt))
     if not segs: sys.exit("[el_clone] srt rong")

@@ -19,18 +19,36 @@ _internal/.
 """
 import os
 
+from PyInstaller.utils.hooks import collect_all
+
 PROJECT_ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 
 DATAS = [
     (os.path.join(PROJECT_ROOT, "web_static"), "web_static"),
 ]
 
+# el_clone.py (dub ElevenLabs) chạy TRONG tiến trình web_server khi FROZEN —
+# bản đóng gói không có python.exe nào để chạy nó như script rời, xem
+# orchestrator.synthesize_elevenlabs_dub. Import nằm trong hàm nên PyInstaller
+# không tự dò ra -> phải khai báo hiddenimport.
+HIDDEN = ["el_clone", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
+          "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on"]
+BINARIES = []
+
+# soundfile mang theo libsndfile (_soundfile_data) — thiếu là ImportError lúc
+# chạy chứ không phải lúc build, nên gom trọn cho chắc.
+_d, _b, _h = collect_all("soundfile")
+DATAS += _d
+BINARIES += _b
+HIDDEN += _h
+# numpy đã có hook sẵn của PyInstaller, không cần collect_all (chỉ làm phình bundle).
+
 a = Analysis(
     [os.path.join(PROJECT_ROOT, "web_server.py")],
     pathex=[PROJECT_ROOT],
-    binaries=[],
+    binaries=BINARIES,
     datas=DATAS,
-    hiddenimports=["uvicorn.loops.auto", "uvicorn.protocols.http.auto", "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on"],
+    hiddenimports=HIDDEN,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

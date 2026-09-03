@@ -173,18 +173,42 @@ def synthesize_elevenlabs_dub(dub_srt, api_key, voice_id, model, work_dir, speed
     stage = "ElevenLabs dub"
     out_wav = work_dir / "el_dub.wav"
     out_srt = work_dir / "el.srt"
-    if FROZEN:
-        py = PVT_CMD_BASE[0]  # frozen chưa hỗ trợ — cần bổ sung sau
-    else:
-        py = str(PVT_PY)
-    cmd = [py, str(EL_CLONE_SCRIPT), "--srt", str(dub_srt), "--out", str(out_wav),
-           "--out-srt", str(out_srt), "--api-key", api_key, "--voice-id", voice_id,
-           "--model", model, "--speed", str(speed)]
+    args = ["--srt", str(dub_srt), "--out", str(out_wav), "--out-srt", str(out_srt),
+            "--api-key", api_key, "--voice-id", voice_id,
+            "--model", model, "--speed", str(speed)]
     print(f"[run] el_clone (voice={voice_id} model={model})")
-    try:
-        subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT))
-    except subprocess.CalledProcessError as e:
-        raise PipelineStageError(stage, f"ElevenLabs lỗi (exit {e.returncode}) — kiểm tra API key/Voice ID/model") from e
+
+    if FROZEN:
+        # Bản đóng gói KHÔNG có python.exe nào để chạy el_clone.py như script rời
+        # (pyvideotrans_cli.exe là bundle PyInstaller, không phải trình thông dịch).
+        # Gọi thẳng trong tiến trình -> lỗi thật nổi lên thành exception đọc được,
+        # thay vì "exit 2" vô nghĩa. el_clone chỉ cần numpy+soundfile+urllib, đã
+        # bundle kèm web_server.exe (xem installer/web_server.spec).
+        import el_clone
+        try:
+            el_clone.main(args)
+        except SystemExit as e:
+            # el_clone dùng sys.exit("<mô tả>") cho lỗi tự bắt được.
+            detail = str(e.code) if e.code not in (0, None) else ""
+            if detail:
+                raise PipelineStageError(stage, detail) from e
+        except Exception as e:
+            raise PipelineStageError(stage, f"{type(e).__name__}: {e}") from e
+    else:
+        cmd = [str(PVT_PY), str(EL_CLONE_SCRIPT), *args]
+        try:
+            # Giữ lại stderr để báo LỖI THẬT lên UI thay vì đoán mò theo exit code.
+            subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT),
+                           stderr=subprocess.PIPE, text=True)
+        except subprocess.CalledProcessError as e:
+            # Bỏ các dòng khung traceback (thụt đầu dòng) -> còn lại đúng dòng
+            # exception cuối hoặc thông báo el_clone tự in ra.
+            lines = [l for l in (e.stderr or "").splitlines()
+                     if l.strip() and not l.startswith((" ", "\t")) and l != "Traceback (most recent call last):"]
+            tail = "\n".join(lines[-3:])
+            raise PipelineStageError(
+                stage, tail or f"el_clone thoát với exit {e.returncode}, không rõ lý do") from e
+
     if not out_wav.exists():
         raise PipelineStageError(stage, f"Không sinh ra file dub: {out_wav}")
     return out_wav, (out_srt if out_srt.exists() else None)
