@@ -88,11 +88,13 @@ jobs:
           Copy-Item dist_stage_raw\web_server\* dist_stage\web_server -Recurse -Force
           Copy-Item dist_stage_raw\pyvideotrans_cli\* dist_stage\pyvideotrans -Recurse -Force
           Copy-Item dist_stage_raw\vsr_cli\* dist_stage\vsr -Recurse -Force
-          # Bắt buộc pyvideotrans chạy offline (không tự thử tải model qua mạng
-          # nếu bundle thiếu model — xem videotrans/configure/_paths.py, IF
-          # netoffline.txt tồn tại -> set HF_HUB_OFFLINE=1). Model đã được bundle
-          # sẵn ở bước dưới nên offline vẫn chạy được.
-          New-Item -ItemType File -Path dist_stage\pyvideotrans\netoffline.txt -Force | Out-Null
+          # KHONG tao netoffline.txt nua. File do bat HF_HUB_OFFLINE=1
+          # (videotrans/configure/_paths.py:71) -> moi model NGOAI "medium" khong
+          # bao gio tai duoc, chet ngay voi "The model download failed".
+          # Bo di VAN chay offline duoc voi model da bundle: help_down.py:117 thu
+          # snapshot_download(local_files_only=True) TRUOC, co san thi khong dung
+          # toi mang. Thieu moi tai, tai xong nam trong pyvideotrans/models
+          # (HF_HUB_CACHE) nen chi tai dung 1 lan.
 
       # ---------- ffmpeg tĩnh dùng chung cho orchestrator.py (cần libass để burn sub) ----------
       # Dùng bản gắn version (n8.1) thay vì "master" — release "latest" của
