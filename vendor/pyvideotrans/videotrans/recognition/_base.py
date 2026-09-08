@@ -194,7 +194,78 @@ class BaseRecogn(BaseCon):
             logger.exception(f'VAD 处理失败 {e}', exc_info=True)
             if not self.recogn2pass:
                 raise
+        if not self.recogn2pass:
+            self._recover_missed_speech()
         self.signal(text=f'[VAD] ended {int(time.time() - _st)}s')
+
+    # --- Luoi vot: doan CO tieng ma VAD bo qua --------------------------------
+    # [MAZINO] Do tren video that co nhac nen to: silero bo trang 125,7s/294,8s.
+    # Rieng doan 00:58-01:26 (27,6s) VAD chi tim ra 2,2s, nhung CA HAI model ASR
+    # deu nghe ro thoai o do ("小白抢回来抓住他厉害啊兄弟" - FireRed va Whisper khop
+    # nhau). FireRed doc CA KHOI 27,6s thi ra dung thoai; chi hong khi bi dua cho
+    # nhung manh 1 giay ('太孤单哦', '爆串'). Nen: khoang trong DAI ma van CO nang
+    # luong am thanh -> tra lai thanh doan de ASR nghe nguyen khoi.
+    GAP_MIN_MS = 3000         # ngan hon thi khong dang vot
+    GAP_ENERGY_RATIO = 0.25   # so voi muc trung vi cua doan VAD da nhan
+    # 8s chu khong phai 25s: do that tren video, FireRed doc dung cau thoai
+    # ("小白抢回来抓住他厉害啊兄弟") tu cua so chi 6 GIAY. Khoi 25s khong lam ASR
+    # tot hon ma de ra cue dai 25 giay - do lan chay f994b2: cue dai nhat nhay
+    # tu 16,7s len 25,0s, so cue >15s tu 1 len 3.
+    GAP_CHUNK_MS = 8000
+
+    def _recover_missed_speech(self):
+        from pydub import AudioSegment
+        import numpy as np
+
+        stamps = [[int(a), int(b)] for a, b in (self.speech_timestamps or []) if b > a]
+        try:
+            audio = AudioSegment.from_wav(self.audio_file)
+            samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
+            if audio.channels > 1:
+                samples = samples.reshape(-1, audio.channels).mean(axis=1)
+            rate = audio.frame_rate
+        except Exception as e:
+            logger.warning(f'[VAD-vot] khong doc duoc audio, bo qua: {e}')
+            return
+        if not samples.size or not rate:
+            return
+        total_ms = int(len(samples) * 1000 / rate)
+
+        def _rms(a_ms, b_ms):
+            seg = samples[int(a_ms * rate / 1000):int(b_ms * rate / 1000)]
+            return float(np.sqrt(np.mean(seg ** 2))) if seg.size else 0.0
+
+        # Muc tham chieu = trung vi nang luong cua nhung doan VAD DA nhan la tieng
+        # noi. Dung trung vi chu khong dung trung binh de mot doan het to khong
+        # keo nguong len lam ca video truot.
+        ref = float(np.median([_rms(a, b) for a, b in stamps])) if stamps else 0.0
+        if ref <= 0:
+            return
+
+        gaps = []
+        prev = 0
+        for a, b in stamps + [[total_ms, total_ms]]:
+            if a - prev >= self.GAP_MIN_MS:
+                gaps.append((prev, a))
+            prev = max(prev, b)
+
+        added = []
+        for g0, g1 in gaps:
+            if _rms(g0, g1) < ref * self.GAP_ENERGY_RATIO:
+                continue          # im that -> de yen
+            t = g0
+            while t < g1:
+                e = min(t + self.GAP_CHUNK_MS, g1)
+                added.append([t, e])
+                t = e
+        if not added:
+            return
+        self.speech_timestamps = sorted(stamps + added, key=lambda x: x[0])
+        msg = (f"[VAD-vot] vot lai {len(added)} doan / "
+               f"{sum(e - s for s, e in added) / 1000:.1f}s bi VAD bo qua "
+               f"(tong khoang trong {sum(g1 - g0 for g0, g1 in gaps) / 1000:.1f}s)")
+        logger.info(msg)
+        print(msg, flush=True)
 
 
     def cut_audio(self) -> List[SrtItem]:
