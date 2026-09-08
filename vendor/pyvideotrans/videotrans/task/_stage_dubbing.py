@@ -4,7 +4,7 @@ import shutil
 import time
 from pathlib import Path
 
-from videotrans.configure.config import tr, app_cfg, settings, logger
+from videotrans.configure.config import tr, app_cfg, settings, logger, params
 from videotrans.configure.excepts import DubbingSrtError
 from videotrans.tts import run as run_tts, SUPPORT_CLONE
 from videotrans.util.help_misc import get_md5
@@ -13,8 +13,37 @@ from videotrans.util.help_srt import get_subtitle_from_srt, delete_punc
 
 class DubbingMixin:
 
+    # [MAZINO] Dich xong -> tra RAM truoc khi long tieng.
+    # qwen2.5:14b chiem 8,7 GB va Ollama giu nguyen trong RAM. May 24 GB da bi
+    # macOS giet 2 LAN o dung buoc nay (17:48 va 19:54, lan sau chet o
+    # "Dubbing [60/83]"), moi lan mat 48 phut xoa sub da chay xong.
+    # Phai dat o DAY chu khong phai sau khi CLI ket thuc: transcribe + dich +
+    # long tieng nam TRONG CUNG mot lan chay CLI, nen ha model sau do thi da muon.
+    @staticmethod
+    def _mazino_free_local_llm():
+        import json as _json
+        import urllib.request
+        api = (params.get('localllm_api') or '').strip()
+        model = (params.get('localllm_model') or '').strip()
+        if not api or not model or '11434' not in api:
+            return          # khong phai Ollama -> khong dung toi
+        base = api.rstrip('/')
+        if base.endswith('/v1'):
+            base = base[:-3].rstrip('/')
+        try:
+            req = urllib.request.Request(
+                f'{base}/api/generate',
+                data=_json.dumps({'model': model, 'keep_alive': 0}).encode(),
+                method='POST', headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=30):
+                pass
+            print(f'[RAM] da day {model} khoi bo nho truoc khi long tieng', flush=True)
+        except Exception as e:
+            logger.warning(f'[RAM] khong day duoc model Ollama khoi bo nho: {e}')
+
     def dubbing(self) -> None:
         _st=time.time()
+        self._mazino_free_local_llm()
         if self._exit() or self.cfg.app_mode == 'tiqu':
             return
         if self.should_dubbing:
