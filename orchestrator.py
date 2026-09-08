@@ -14,6 +14,8 @@ Usage:
 """
 import argparse
 import json
+import signal
+import threading as _threading
 import os
 import re
 import shutil
@@ -109,16 +111,104 @@ def preflight_checks():
         )
 
 
-def run(cmd, cwd=None, stage=""):
+class PipelineCancelled(Exception):
+    """Người dùng bấm Ngưng — không phải lỗi, không báo đỏ."""
+
+
+_LIVE_PROCS = set()
+_PROCS_LOCK = _threading.Lock()
+_CANCEL = _threading.Event()
+
+
+def reset_cancel():
+    _CANCEL.clear()
+
+
+def is_cancelled():
+    return _CANCEL.is_set()
+
+
+def check_cancelled():
+    """Gọi ở ranh giới từng bước để dừng cả những bước chạy trong tiến trình."""
+    if _CANCEL.is_set():
+        raise PipelineCancelled()
+
+
+def cancel_all():
+    """Bắn SIGTERM cho cả NHÓM tiến trình đang chạy. -> số tiến trình đã bắn.
+
+    Giết theo NHÓM (killpg) chứ không riêng tiến trình con: VSR và pyvideotrans
+    còn đẻ tiếp tiến trình cháu (ffmpeg, worker torch); giết mỗi tiến trình cha
+    thì cháu vẫn chạy tiếp, vẫn ăn CPU và RAM. Vì thế Popen dưới đây luôn mở
+    phiên mới (start_new_session) để có nhóm riêng mà giết.
+    """
+    _CANCEL.set()
+    with _PROCS_LOCK:
+        procs = list(_LIVE_PROCS)
+    for p in procs:
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+        except Exception:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+    return len(procs)
+
+
+def run(cmd, cwd=None, stage="", tail_lines=0):
+    """tail_lines > 0: vừa in ra như cũ, vừa giữ lại N dòng cuối để nhét vào
+    thông báo lỗi. Cần cho việc phân biệt "hết quota Gemini" với lỗi khác —
+    exit code chỉ cho biết THẤT BẠI, không cho biết VÌ SAO.
+
+    Luôn dùng Popen (kể cả khi không cần giữ log) để nút Ngưng có cái mà giết:
+    subprocess.run() chặn luôn luồng, không lấy được tiến trình ra ngoài."""
+    check_cancelled()
     print(f"[run] {' '.join(str(c) for c in cmd)}")
+
+    from collections import deque
+    keep = deque(maxlen=tail_lines) if tail_lines > 0 else None
+    kw = {"cwd": cwd, "start_new_session": True}
+    if keep is not None:
+        kw.update(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                  encoding="utf-8", errors="replace", bufsize=1)
     try:
-        subprocess.run(cmd, cwd=cwd, check=True)
+        proc = subprocess.Popen(cmd, **kw)
     except FileNotFoundError as e:
         raise PipelineStageError(stage, f"Không tìm thấy chương trình để chạy: {e.filename}") from e
-    except subprocess.CalledProcessError as e:
+
+    with _PROCS_LOCK:
+        _LIVE_PROCS.add(proc)
+    try:
+        if keep is not None:
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                keep.append(line.rstrip("\n"))
+        code = proc.wait()
+    finally:
+        with _PROCS_LOCK:
+            _LIVE_PROCS.discard(proc)
+
+    check_cancelled()   # bị giết do bấm Ngưng -> không phải lỗi pipeline
+    if code != 0:
         raise PipelineStageError(
-            stage, f"Lệnh thất bại (exit code {e.returncode}): {' '.join(str(c) for c in cmd)}"
-        ) from e
+            stage,
+            f"Lệnh thất bại (exit code {code}): {' '.join(str(c) for c in cmd)}"
+            + ("\n" + "\n".join(keep) if keep else ""),
+        )
+
+
+# Dấu hiệu "hết hạn mức" của Gemini. Bậc miễn phí chỉ 20 request/NGÀY cho mỗi
+# model (quotaId GenerateRequestsPerDayPerProjectPerModel-FreeTier) — 1 video
+# 58 cue với batch 20 đã tốn 3 request. Quota tính RIÊNG từng model nên đổi
+# model là có thêm 20 lượt.
+QUOTA_MARKERS = ("RESOURCE_EXHAUSTED", "exceeded your current quota",
+                 "429", "quota", "rate limit", "rate_limit")
+
+
+def is_quota_error(text):
+    t = str(text).lower()
+    return any(m.lower() in t for m in QUOTA_MARKERS)
 
 
 def probe_resolution(video_path):
@@ -214,6 +304,63 @@ def synthesize_elevenlabs_dub(dub_srt, api_key, voice_id, model, work_dir, speed
     return out_wav, (out_srt if out_srt.exists() else None)
 
 
+# --- Nhận dạng giọng nói: FireRedASR + ElevenLabs Scribe ---------------------
+# recogn_type của pyvideotrans (videotrans/recognition/__init__.py):
+#   0 = faster-whisper (local)   4 = FireRedASR (local)   20 = ElevenLabs Scribe (cloud)
+RECOGN_WHISPER = "0"
+RECOGN_FIRERED = "4"
+RECOGN_ELEVENLABS = "20"
+
+# _fireredasr.py đặt model ở {pyvideotrans}/models/fireredasr và nạp encoder
+# int8 ONNX qua sherpa-onnx. Kiểm đúng file encoder chứ không chỉ kiểm thư mục:
+# lần tải dở vẫn để lại thư mục rỗng mà chạy là hỏng (bài học từ Whisper model.bin).
+FIRERED_DIR = PVT_DIR / "models" / "fireredasr"
+FIRERED_ENCODER = FIRERED_DIR / "encoder.int8.onnx"
+
+
+# FireRedASR trả text THÔ không dấu câu -> cả đoạn dồn thành 1 câu dài, dịch ra
+# lủng củng. pyvideotrans có sẵn bước khôi phục dấu câu (--fix_punc) chạy bằng
+# sherpa-onnx ct-transformer, dùng chung thư viện với FireRed nên không kéo thêm
+# dependency nào cho bản đóng gói Windows.
+PUNC_MODEL = PVT_DIR / "models" / "puntc" / "model.onnx"
+
+
+def firered_ready():
+    return FIRERED_ENCODER.exists()
+
+
+def punc_ready():
+    return PUNC_MODEL.exists()
+
+
+def _pvt_params_path():
+    return PVT_DIR / "videotrans" / "params.json"
+
+
+def get_elevenlabs_api_key():
+    """Key ElevenLabs đã lưu (dùng chung cho cả giọng đọc TTS lẫn Scribe STT —
+    videotrans/recognition/_elevenlabs.py đọc đúng key elevenlabstts_key này)."""
+    import json as _json
+    pv = _pvt_params_path()
+    if not pv.exists():
+        return ""
+    try:
+        return (_json.loads(pv.read_text(encoding="utf-8")).get("elevenlabstts_key") or "").strip()
+    except Exception:
+        return ""
+
+
+def set_elevenlabs_api_key(api_key):
+    """Ghi riêng API key (không đụng voice_id) — dùng khi chỉ chọn Scribe để
+    transcribe mà giọng đọc vẫn là Edge-TTS/F5."""
+    import json as _json
+    pv = _pvt_params_path()
+    d = _json.loads(pv.read_text(encoding="utf-8")) if pv.exists() else {}
+    d["elevenlabstts_key"] = api_key
+    pv.parent.mkdir(parents=True, exist_ok=True)
+    pv.write_text(_json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
 def set_elevenlabs_config(api_key, voice_id, model="eleven_multilingual_v2", name="EL Voice"):
     """Ghi API key + voice_id vào config của pyvideotrans để dùng ElevenLabs
     (tts_type=22). pyvideotrans đọc key từ params.json, voice_id từ elevenlabs.json
@@ -231,26 +378,562 @@ def set_elevenlabs_config(api_key, voice_id, model="eleven_multilingual_v2", nam
     return name
 
 
+# --- Kênh dịch --------------------------------------------------------------
+# translate_type của pyvideotrans (translator/_constants.py):
+#   0 = Google (miễn phí, không key)   6 = Gemini   9 = Local LLM (Ollama)
+# Google dịch TỪNG cue độc lập, không nhớ ngữ cảnh, không hiểu tiếng lóng và
+# hay đổi cách phiên tên riêng giữa chừng (đo được: 小白 ra "Tiểu Bạch" chỗ này,
+# "Xiaobai" chỗ kia). Hai kênh LLM nhận CẢ BATCH srt nên giữ được mạch hội thoại,
+# lại đọc được prompt + glossary do ta soạn.
+TRANS_GOOGLE = "0"
+TRANS_GEMINI = "6"
+TRANS_OLLAMA = "9"
+
+OLLAMA_API = "http://localhost:11434/v1"
+# 14b chứ không phải 7b: đo 3 lượt trên 58 cue thật, 7b LỆCH DÒNG mọi lượt
+# (câu 16 nhận bản dịch câu 17) và bỏ dịch 18-32 block; 14b không lệch lượt nào,
+# chỉ sót 2-5 block. Đánh đổi: 14b chậm gấp đôi (~110s so với ~50s).
+OLLAMA_DEFAULT_MODEL = "qwen2.5:14b"
+# KHÔNG dùng gemini-2.5-flash / 2.5-flash-lite: Google đã ngừng cấp cho tài
+# khoản mới, API trả "no longer available to new users" dù model vẫn còn liệt kê
+# trong /v1beta/models — cái bẫy này đã làm hỏng 1 job thật.
+# Thứ tự thử: mỗi model có quota 20 req/ngày RIÊNG, nên hết model này còn model
+# kia. Đã smoke-test cả 3 trả HTTP 200 với key của Mazino.
+GEMINI_MODEL_CHAIN = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.6-flash"]
+GEMINI_DEFAULT_MODEL = GEMINI_MODEL_CHAIN[0]
+
+
+# Luật riêng cho tiếng Việt, chèn vào prompt của kênh LLM. Prompt gốc của
+# pyvideotrans đã lo phần chung (văn nói, ép 1-1 block, nén ngắn cho khớp TTS)
+# nhưng KHÔNG biết gì về tiếng Việt — nên Google lẫn LLM đều mắc đúng mấy lỗi
+# đã đo được trên video thật: xưng hô "Bạn" cho nhóm bạn trẻ cãi nhau, 块钱
+# thành "đô la", 张若雪 thành "Zhang Ruoxue", 雪糕刺客 dịch chữ thành "sát thủ".
+VI_PROMPT_RULES = """
+# VIETNAMESE-SPECIFIC RULES (HIGHEST PRIORITY — override anything above that conflicts)
+
+## Xưng hô (pronouns) — quan trọng nhất
+Vietnamese has no neutral "you". Choosing wrong makes the dub sound robotic.
+- NEVER default to "Bạn"/"bạn" unless the speakers are actually strangers being polite.
+- Young friends joking, teasing, arguing (the common case in short-form video):
+  use "mày/tao", "ông/tôi", "bà/tôi", or bare imperatives with no pronoun at all.
+- Speaking to an older man/peer casually: "anh"; to an older woman: "chị";
+  to a younger person: "em". Keep the SAME pronoun pair for the same speaker
+  across the whole file — do not switch halfway.
+- Chinese vocatives 大哥/哥/姐/兄弟 are usually just casual address, NOT literal
+  family: render as "ông ơi", "anh ơi", "bà ơi", "thằng bạn" — never "Anh lớn".
+
+## Tên riêng (proper nouns)
+- Use the Sino-Vietnamese (Hán-Việt) reading, NEVER pinyin romanisation.
+  小白 -> "Tiểu Bạch" (never "Xiaobai"); 张若雪 -> "Trương Nhược Tuyết"
+  (never "Zhang Ruoxue"); 白天鹏 -> "Bạch Thiên Bằng".
+- Once you pick a rendering for a name, reuse it identically everywhere.
+
+## Tiền tệ, số, đơn vị
+- 块 / 块钱 / 元 / 人民币 = "tệ" (NEVER "đô la", never "nhân dân tệ" in speech).
+- Read decimals the Vietnamese way: 65.3度 -> "65 phẩy 3 độ".
+
+## Tiếng lóng & meme
+Translate the MEANING, never word-by-word. If a Chinese internet slang term has
+no Vietnamese equivalent, use a short natural Vietnamese phrase with the same
+punch. Example: 雪糕刺客 is not "sát thủ kem" — it means ice cream that turns out
+shockingly expensive at checkout -> "kem chém giá" / "kem cắt cổ".
+
+## Văn phong
+- Spoken Vietnamese as heard in vlogs and street videos, not textbook Vietnamese.
+- Keep interjections alive: 哎呀 -> "Ối giời", 妈呀 -> "Má ơi", 卧槽 -> "Vãi".
+- Drop the machine-translation tics: never "Bạn có thể vui lòng...",
+  never "Bạn chưa bao giờ nhìn thấy điều này trước đây".
+- Do not translate filler that adds nothing (啊/呢/吧 at sentence end) literally.
+
+## Định dạng đầu ra — ĐỌC KỸ (đã làm hỏng job thật)
+- Output the translation text and NOTHING else. Never wrap a line in angle
+  brackets, square brackets, parentheses, quotes or any tag. The placeholder
+  examples earlier in this prompt use wrappers ONLY to mark "put text here" —
+  those wrappers are NOT part of the expected output. Copying them is a FATAL
+  ERROR: the dubbing engine reads a wrapped line as markup, speaks nothing, and
+  the whole job crashes.
+- Give exactly ONE translation per line. Never offer alternatives separated by
+  "|" or "/". Pick the best one and output only that.
+- Never leave Chinese, Japanese or Korean characters in the output — not even a
+  single one, not even inside an otherwise Vietnamese sentence. If a word is
+  hard, translate its meaning; never copy the source characters through.
+"""
+
+# Glossary khởi đầu, rút từ chính video test của Mazino. Format của
+# pyvideotrans: mỗi dòng "từ gốc=bản dịch", nạp vào prompt kèm chỉ thị BẮT BUỘC
+# dùng đúng (util/help_misc.py:get_prompt).
+VI_GLOSSARY = """小白=Tiểu Bạch
+白天鹏=Bạch Thiên Bằng
+张若雪=Trương Nhược Tuyết
+块钱=tệ
+人民币=tệ
+雪糕刺客=kem chém giá
+大哥=ông ơi
+哎呀=Ối giời
+妈呀=Má ơi"""
+
+
+# Prompt gốc của pyvideotrans minh hoạ đầu ra mong muốn bằng những dòng bọc
+# trong ngoặc vuông ("[Extremely concise translation of ... in {lang}]"). Model
+# nhỏ BẮT CHƯỚC cái vỏ đó: qwen2.5:14b đã trả về 10 dòng liền bọc "<...>" trong
+# job thật. ElevenLabs coi dòng bọc ngoặc là markup, không đọc thành tiếng, dồn
+# cả cụm về một mốc thời gian -> el_clone cắt đoạn dài 0 giây -> ffmpeg exit 234.
+# Bóc ngoặc ở ví dụ thì không còn khuôn nào để bắt chước.
+_EXAMPLE_WRAP_RE = re.compile(r"^\[(.+)\]$", re.M)
+
+
+def _defuse_bracket_examples(text):
+    """Bỏ ngoặc vuông ở những dòng ví dụ chỉ-toàn-placeholder. -> (text, số dòng đã sửa)"""
+    n = 0
+
+    def sub(m):
+        nonlocal n
+        n += 1
+        return m.group(1)
+
+    return _EXAMPLE_WRAP_RE.sub(sub, text), n
+
+
+def install_vi_translation_assets(overwrite_glossary=False):
+    """Chèn luật tiếng Việt vào prompt của Gemini + Local LLM, và tạo glossary.
+
+    Chèn NGAY TRƯỚC mục "# ACTUAL TASK" để luật nằm sau phần khung chung nhưng
+    trước dữ liệu thật -> mô hình đọc luật gần nhất với lúc phải áp dụng.
+
+    LUÔN dựng lại từ bản .orig thay vì bỏ qua khi đã chèn: trước đây hàm này
+    thoát sớm nếu thấy marker, nên mọi lần sửa VI_PROMPT_RULES về sau đều KHÔNG
+    tới được máy đã chạy một lần — prompt đứng im ở phiên bản đầu tiên.
+    """
+    done = []
+    targets = [(kind, name) for kind in ("srt", "text") for name in ("gemini", "localllm")]
+    for kind, name in targets:
+        f = PVT_DIR / "videotrans" / "prompts" / kind / f"{name}.txt"
+        if not f.exists():
+            continue
+        orig = f.with_suffix(".txt.orig")
+        if not orig.exists():
+            orig.write_text(f.read_text(encoding="utf-8-sig"), encoding="utf-8")
+        base, n_fix = _defuse_bracket_examples(orig.read_text(encoding="utf-8-sig"))
+        cut = "# ACTUAL TASK"
+        text = (base.replace(cut, VI_PROMPT_RULES + "\n" + cut, 1)
+                if cut in base else base + VI_PROMPT_RULES)
+        if text != f.read_text(encoding="utf-8-sig", errors="replace"):
+            f.write_text(text, encoding="utf-8")
+            done.append(f"{kind}/{name} (bóc ngoặc {n_fix} dòng ví dụ)")
+
+    # glossary.txt KHÔNG nằm trong DATAS của bản đóng gói -> phải ghi lúc chạy,
+    # giống cfg.json. Không đè nếu Mazino đã tự sửa thêm từ của riêng anh ấy.
+    g = PVT_DIR / "videotrans" / "glossary.txt"
+    if overwrite_glossary or not g.exists():
+        g.write_text(VI_GLOSSARY, encoding="utf-8")
+    return done
+
+
+def _write_pvt_params(**kv):
+    """Ghi thêm khoá vào params.json của pyvideotrans, giữ nguyên khoá cũ."""
+    import json as _json
+    pv = _pvt_params_path()
+    d = _json.loads(pv.read_text(encoding="utf-8")) if pv.exists() else {}
+    d.update({k: v for k, v in kv.items() if v is not None})
+    pv.parent.mkdir(parents=True, exist_ok=True)
+    pv.write_text(_json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def get_gemini_key():
+    import json as _json
+    pv = _pvt_params_path()
+    if not pv.exists():
+        return ""
+    try:
+        return (_json.loads(pv.read_text(encoding="utf-8")).get("gemini_key") or "").strip()
+    except Exception:
+        return ""
+
+
+def set_gemini_config(api_key=None, model=GEMINI_DEFAULT_MODEL):
+    _write_pvt_params(gemini_key=api_key, gemini_model=model)
+    set_ai_batch(AI_BATCH_GEMINI, send_srt=False)
+
+
+# Số block SRT gửi mỗi lần cho LLM. Prompt bắt trả về ĐÚNG số block, nhưng model
+# càng nhỏ càng dễ trôi: đo thực tế qwen2.5:7b nuốt mất block cuối khi gửi cả
+# batch. Thiếu block thì pyvideotrans chèn dòng RỖNG bù vào
+# (translator/_base.py:114-117) -> phụ đề mất chữ. Batch nhỏ đổi lấy độ tin cậy;
+# vẫn đủ ngữ cảnh vì mỗi batch là mấy câu liền mạch của cùng đoạn hội thoại.
+AI_BATCH_OLLAMA = 8
+AI_BATCH_GEMINI = 20
+
+
+def set_ai_batch(n, send_srt=True):
+    """aitrans_thread + aisendsrt nằm trong cfg.json (settings), không phải params.json.
+
+    send_srt=False -> chỉ gửi TỪNG DÒNG text trần thay vì cả khối SRT có số thứ
+    tự + timestamp. Model nhỏ chép lại timestamp rất hay sai: đo qwen2.5:7b thấy
+    kết quả LỆCH nguyên một dòng (câu 16 nhận bản dịch của câu 17) và 18/57 block
+    trả về nguyên chữ Hán. Chế độ dòng khớp 1-1 nên không lệch được."""
+    import json as _json
+    cfg = PVT_DIR / "videotrans" / "cfg.json"
+    try:
+        d = _json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
+    except Exception:
+        d = {}
+    d["aitrans_thread"] = int(n)
+    d["aitrans_context"] = False   # True = nhét cả file vào 1 lần -> trôi nặng
+    d["aisendsrt"] = bool(send_srt)
+    try:
+        cfg.write_text(_json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:
+        return False
+    return True
+
+
+def set_ollama_config(model=OLLAMA_DEFAULT_MODEL, api_url=OLLAMA_API):
+    """Ollama phơi API tương thích OpenAI ở /v1 nên dùng thẳng kênh Local LLM.
+    localllm_key phải khác rỗng: thư viện openai từ chối key rỗng, còn Ollama
+    thì không kiểm nên giá trị gì cũng được."""
+    _write_pvt_params(localllm_api=api_url, localllm_model=model, localllm_key="ollama")
+    set_ai_batch(AI_BATCH_OLLAMA, send_srt=False)
+
+
+def ollama_unload(model=None):
+    """Đẩy model Ollama ra khỏi RAM ngay, không đợi hết keep_alive mặc định (5 phút).
+
+    qwen2.5:14b chiếm 8,4 GB và Ollama giữ nguyên trong RAM suốt job. Máy 24 GB
+    thì tới bước 3-4 (LaMa/PyTorch + ffmpeg ghép video) là vượt trần: đo thực tế
+    macOS đã giết cả Ollama lẫn web server lúc 17:48, mất trắng 48 phút xoá sub
+    đã chạy xong trước đó. Dịch xong là không cần model nữa -> trả RAM luôn.
+    """
+    import json as _json
+    import urllib.request
+    model = model or _read_pvt_param("localllm_model", OLLAMA_DEFAULT_MODEL)
+    api = _read_pvt_param("localllm_api", OLLAMA_API).rstrip("/")
+    base = api[:-3].rstrip("/") if api.endswith("/v1") else api
+    try:
+        req = urllib.request.Request(
+            f"{base}/api/generate",
+            data=_json.dumps({"model": model, "keep_alive": 0}).encode(),
+            method="POST", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30):
+            pass
+        print(f"[RAM] đã đẩy {model} khỏi bộ nhớ (~8 GB) trước bước lồng tiếng", flush=True)
+        return True
+    except Exception as e:
+        print(f"[RAM] không đẩy được model Ollama khỏi bộ nhớ: {e}", flush=True)
+        return False
+
+
+def ollama_models():
+    """Danh sách model đang có trong Ollama. Máy chưa chạy Ollama -> [] (UI sẽ
+    ghi rõ chưa sẵn sàng thay vì để người dùng chọn xong mới ăn lỗi)."""
+    import json as _json
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2) as r:
+            return [m["name"] for m in _json.loads(r.read()).get("models", [])]
+    except Exception:
+        return []
+
+
+# --- Làm sạch bản dịch trước khi đưa xuống phụ đề & lồng tiếng ----------------
+# Model local trả về rác theo 3 kiểu, cả 3 đều đo được trên job thật:
+#   1. Bọc từng dòng trong "<...>" (bắt chước ví dụ placeholder của prompt gốc).
+#      ElevenLabs đọc dòng bọc ngoặc như markup -> không phát ra tiếng -> alignment
+#      dồn cả cụm về MỘT mốc -> el_clone cắt đoạn 0 giây -> ffmpeg exit 234.
+#   2. Lọt nguyên chữ Hán ("ông没事", "下去 xem cho kỹ"). Đo qwen2.5:14b: 2-3 dòng
+#      lọt ở CẢ 3/3 lượt chạy trên cùng 12 câu -> đây là lỗi hệ thống, không phải
+#      xui. Giọng Việt không đọc được chữ Hán, mà phụ đề hiện ra thì lộ hẳn.
+#   3. Đưa 2 phương án ngăn bằng "|" ("...交给我们。| ...我们来处理。").
+# Hạ nguồn không có cách nào phân biệt rác với nội dung thật, nên phải chặn ở đây.
+CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿぀-ヿ가-힯]")
+# Dau cau Trung nam o khoi Unicode KHAC voi chu Han nen khong lot luoi CJK_RE,
+# de nguyen thi phu de hien "Chan\u3002" rat lo. Quy doi thay vi xoa: dau van mang
+# thong tin ngat cau cho ca nguoi doc lan bo cat dong.
+_CJK_PUNCT = str.maketrans({
+    "\u3002": ".", "\uff0c": ",", "\u3001": ",", "\uff01": "!",
+    "\uff1f": "?", "\uff1b": ";", "\uff1a": ":", "\uff08": "(",
+    "\uff09": ")", "\u3010": "(", "\u3011": ")", "\u300a": '\"',
+    "\u300b": '\"', "\u300c": '\"', "\u300d": '\"', "\u300e": '\"',
+    "\u300f": '\"', "\u3000": " ", "\uff5e": "~",
+})
+_WRAP_RE = re.compile(r"^\s*<\s*(.+?)\s*>\s*$|^\s*\[\s*(.+?)\s*\]\s*$", re.S)
+_STRAY_TAG_RE = re.compile(r"</?\s*TRANSLATE_TEXT\s*>", re.I)
+
+
+def _strip_wrappers(text):
+    """Bóc lớp vỏ <...> / [...] bọc TRỌN dòng. Lặp vì có khi bọc lồng nhau."""
+    t = _STRAY_TAG_RE.sub("", text).strip()
+    for _ in range(3):
+        m = _WRAP_RE.match(t)
+        if not m:
+            break
+        t = (m.group(1) or m.group(2) or "").strip()
+    return t
+
+
+def _candidate_ok(cand, ask):
+    """Ban dich lai chi dung duoc khi khong nuot mat noi dung.
+
+    Do tren job that: dua nguyen mot cau dai lan chu Han cho qwen, no tra ve mot
+    ban viet lai NGAN hon nhieu ("...ong di doc sach, ong<40 chu Han>" -> chi con
+    hai bien the ngan trong ngoac kep). Cau ngan thi ti le do vo nghia (dich ra
+    tieng Viet thuong dai hon ban Trung), nen chi chan o cau du dai.
+    """
+    if not cand:
+        return False
+    return not (len(ask) >= 40 and len(cand) < 0.6 * len(ask))
+
+
+def _clean_cjk(text):
+    """Xoa han chu Han con sot, don khoang trang, cat dau cau thua hai dau."""
+    return re.sub(r"\s{2,}", " ", CJK_RE.sub("", text)).strip(" ,.;:!?-").strip()
+
+
+# Model đưa nhiều phương án dịch cho cùng một câu. Đã gặp HAI kiểu ngăn cách
+# trên job thật: bằng "|" ("...交给我们。| ...我们来处理。") và bằng ',:' kèm ngoặc
+# kép ('lòng ta như,:"hở ra như bị"trái tim tan vỡ",:"trái tim ta như tan vỡ"').
+# Cả hai đều sẽ bị đọc thành tiếng nếu không chặn. ',:' không xuất hiện trong
+# tiếng Việt tự nhiên nên cắt ở đó là an toàn.
+_ALT_RE = re.compile(r"\||,\s*:")
+
+
+def _cut_alternatives(text):
+    """Lấy phương án ĐẦU, bỏ các phương án model đưa thêm."""
+    m = _ALT_RE.search(text)
+    if not m:
+        return text
+    head = text[:m.start()].strip().strip('"\u201c\u201d').strip()
+    return head or text
+
+
+def _read_pvt_param(key, default=""):
+    import json as _json
+    pv = _pvt_params_path()
+    if not pv.exists():
+        return default
+    try:
+        return _json.loads(pv.read_text(encoding="utf-8")).get(key) or default
+    except Exception:
+        return default
+
+
+def _llm_once(prompt, translate_type, timeout=120):
+    """Gọi thẳng engine dịch cho MỘT câu hỏi. -> text, hoặc None nếu không gọi được.
+
+    Cố tình không đi qua pyvideotrans: ở đây chỉ cần dịch lại vài dòng lẻ, dựng
+    lại cả pipeline dịch của nó vừa chậm vừa kéo theo mọi hành vi batch đang lỗi.
+    """
+    import json as _json
+    import urllib.request
+    try:
+        if translate_type == TRANS_OLLAMA:
+            body = {"model": _read_pvt_param("localllm_model", OLLAMA_DEFAULT_MODEL),
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.2, "stream": False}
+            api = _read_pvt_param("localllm_api", OLLAMA_API).rstrip("/")
+            req = urllib.request.Request(f"{api}/chat/completions",
+                                         data=_json.dumps(body).encode(), method="POST",
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return _json.loads(r.read())["choices"][0]["message"]["content"]
+        if translate_type == TRANS_GEMINI:
+            key = get_gemini_key()
+            if not key:
+                return None
+            model = _read_pvt_param("gemini_model", GEMINI_DEFAULT_MODEL)
+            url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                   f"{model}:generateContent?key={key}")
+            body = {"contents": [{"parts": [{"text": prompt}]}]}
+            req = urllib.request.Request(url, data=_json.dumps(body).encode(),
+                                         method="POST",
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                d = _json.loads(r.read())
+            return d["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        print(f"[sạch] gọi lại engine dịch hỏng: {e}", flush=True)
+    return None
+
+
+_RETRY_PROMPT = """Translate this ONE Chinese video-subtitle line into casual spoken Vietnamese.
+
+HARD RULES:
+- Answer with the Vietnamese translation ONLY. One single line.
+- NO quotes, NO angle brackets, NO square brackets, NO tags, NO explanation.
+- Give ONE version only. Never offer alternatives separated by "|" or "/".
+- ZERO Chinese/Japanese characters may appear in your answer.
+- Casual spoken register (mày/tao, ông ơi, Ối giời), never textbook Vietnamese,
+  never "Bạn" for friends joking around.
+- Names use Hán-Việt readings, never pinyin: 小白=Tiểu Bạch, 白天鹏=Bạch Thiên Bằng,
+  张若雪=Trương Nhược Tuyết. 块钱/元/人民币 = "tệ".
+
+LINE: {line}"""
+
+
+def _retranslate_line(source_text, translate_type, tries=2):
+    """Dich lai 1 dong -> (ban sach hoac None, ung vien tot nhat).
+
+    Tra ve CA ung vien chua sach: qwen hay dich dung y ma van dinh lai 1-2 chu
+    Han ("May chan muon chet le."). Bo di thi phai lui ve ban goc con te hon;
+    giu lai roi xoa chu Han thi duoc cau dung duoc.
+    """
+    best = ""
+    for _ in range(tries):
+        out = _llm_once(_RETRY_PROMPT.format(line=source_text), translate_type)
+        if not out or not out.strip():
+            break
+        cand = _cut_alternatives(_strip_wrappers(out.strip().splitlines()[0]))
+        if not cand:
+            continue
+        if not CJK_RE.search(cand):
+            return cand, cand
+        if not best or len(CJK_RE.findall(cand)) < len(CJK_RE.findall(best)):
+            best = cand
+    return None, best
+
+
+def sanitize_translated_srt(srt_path, source_srt=None, translate_type=TRANS_GOOGLE,
+                            tries=2):
+    """Làm sạch .srt dịch TẠI CHỖ. -> dict thống kê để log.
+
+    Thứ tự: bóc vỏ -> cắt phương án thừa -> dòng nào còn chữ Hán thì dịch lại
+    (ưu tiên dịch lại từ câu GỐC nếu có file srt nguồn khớp số cue) -> vẫn còn
+    thì xoá hẳn chữ Hán. Không bao giờ để dòng rỗng: parse_srt của el_clone bỏ
+    qua cue rỗng, lệch số đoạn là hỏng cả bản lồng tiếng.
+    """
+    cues = parse_srt(srt_path)
+    if not cues:
+        return {"cues": 0, "unwrapped": 0, "cut_alt": 0, "cjk": 0, "fixed": 0, "stripped": 0}
+
+    # Ghep voi cau GOC theo MOC THOI GIAN, khong theo chi so: pyvideotrans co the
+    # lam mat han mot cue khi dich (do that: nguon 58 cue -> ban dich 57), tu do
+    # tro di chi so lech het. Moc thoi gian thi khong doi - do lai tren job that:
+    # 57/57 cue khop chinh xac tung mili giay.
+    src = parse_srt(source_srt) if source_srt and Path(source_srt).exists() else []
+    smap = {a: t for a, _b, t in src}
+
+    st = {"cues": len(cues), "unwrapped": 0, "cut_alt": 0, "cjk": 0, "fixed": 0, "stripped": 0}
+    out = []
+    for i, (start, end, text) in enumerate(cues):
+        t = _strip_wrappers(text)
+        if t != text.strip():
+            st["unwrapped"] += 1
+        t2 = _cut_alternatives(t)
+        if t2 != t:
+            st["cut_alt"] += 1
+        t = t2.translate(_CJK_PUNCT)
+
+        if CJK_RE.search(t):
+            st["cjk"] += 1
+            # CHI dich lai khi tim duoc cau goc. Dua nguyen ban dich da hong cho
+            # model "sua ho" thi no khong biet dang lam gi: do that, qwen tra ve
+            # mot mo bien the lap lai con te hon ban hong ban dau.
+            ask = smap.get(start, "")
+            good, best = _retranslate_line(ask, translate_type, tries=tries) if (
+                ask and translate_type in (TRANS_OLLAMA, TRANS_GEMINI)) else (None, "")
+            if good and _candidate_ok(good, ask):
+                st["fixed"] += 1
+                t = good.translate(_CJK_PUNCT)
+            else:
+                # Thà mất mấy chữ còn hơn để chữ Hán lên phụ đề tiếng Việt và
+                # bắt giọng Việt đọc thứ nó không đọc được.
+                # Uu tien xoa tren ban dich lai (sat nghia hon), chi lui ve
+                # ban cu khi khong co ung vien nao.
+                cand = (_clean_cjk(best.translate(_CJK_PUNCT))
+                        if _candidate_ok(best, ask) else "")
+                t = cand or _clean_cjk(t)
+                st["stripped"] += 1
+                if not t:
+                    t = "…"
+        out.append((start, end, t))
+
+    Path(srt_path).write_text(
+        "\n".join(f"{i}\n{_ms_to_srt_ts(a)} --> {_ms_to_srt_ts(b)}\n{c}\n"
+                  for i, (a, b, c) in enumerate(out, 1)),
+        encoding="utf-8")
+    return st
+
+
+# --- Độ dài đoạn nhận dạng (quyết định cả chất lượng dịch lẫn phụ đề) --------
+# pyvideotrans gộp mọi cue ngắn hơn min_speech_duration_ms vào cue kề
+# (recognition/_base.py:_phase1_merge_short). Mặc định 2000ms khiến gộp dây
+# chuyền: đo trên video thật ra cue trung bình 12,3s, dài nhất 44,5s, 11/20 cue
+# vượt 8s. Hậu quả kép:
+#   1. Cả khối chữ đổ lên màn hình cùng lúc, che kín video.
+#   2. Google dịch nguyên đoạn dài thì tên riêng không nhất quán — đo được
+#      小白 ra "Tiểu Bạch" chỗ này, "Xiaobai" chỗ kia trong CÙNG một cue.
+# Hạ xuống 1000ms: VAD vốn đã không phát đoạn ngắn hơn ngưỡng này nên gần như
+# không còn gì để gộp -> cue nằm trong 1-5s = cỡ một câu trọn. KHÔNG hạ thấp
+# hơn: dưới ~1s là rơi vào đúng kiểu vụn 0,28s của Whisper ("我看" -> "tôi
+# thấy"), lúc đó mới thật sự mất ngữ cảnh.
+SEG_MIN_SPEECH_MS = 1000
+SEG_MAX_SPEECH_S = 5
+
+
+# Nguong silero-VAD. Mac dinh 0.5 bo sot rat nang khi video co nhac nen to: do
+# tren video that, doan 00:58-01:26 (27,6s) chi tim ra 2,2s tieng noi, trong khi
+# CA HAI model ASR deu nghe ro thoai ("小白抢回来抓住他厉害啊兄弟"). Ha xuong 0.35
+# -> bat duoc ~4,1s. Khong ha sau hon vi cang thap cang de nhan nham nhac nen
+# thanh tieng noi; phan con lai de luoi vot (_recover_missed_speech) lo.
+SEG_VAD_THRESHOLD = 0.35
+
+
+def tune_segmentation(min_speech_ms=SEG_MIN_SPEECH_MS, max_speech_s=SEG_MAX_SPEECH_S,
+                      threshold=SEG_VAD_THRESHOLD):
+    """Ghi ngưỡng cắt đoạn vào cfg.json của pyvideotrans trước mỗi lần chạy.
+
+    Ghi lúc chạy chứ không sửa sẵn file vendor: bản đóng gói Windows KHÔNG bundle
+    cfg.json (AppSettings tự tạo lại với default khi thiếu — xem ghi chú DATAS
+    trong installer/pyvideotrans_cli.spec), nên sửa tay file vendor sẽ mất trên
+    máy người dùng."""
+    import json as _json
+    cfg = PVT_DIR / "videotrans" / "cfg.json"
+    try:
+        d = _json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
+    except Exception:
+        d = {}
+    before = d.get("min_speech_duration_ms")
+    before_th = d.get("threshold")
+    d["min_speech_duration_ms"] = int(min_speech_ms)
+    d["max_speech_duration_s"] = int(max_speech_s)
+    d["threshold"] = float(threshold)
+    try:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(_json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        print(f"[cảnh báo] không ghi được cfg.json ({e}) — vẫn chạy với ngưỡng cũ", flush=True)
+        return False
+    if before != int(min_speech_ms) or before_th != float(threshold):
+        print(f"[đoạn] min_speech {before} -> {min_speech_ms}ms, max_speech {max_speech_s}s, "
+              f"ngưỡng VAD {before_th} -> {threshold}", flush=True)
+    return True
+
+
 def transcribe_translate_dub(input_video, work_dir, source_lang, target_lang,
-                              model_name, voice_role, tts_type="0"):
+                              model_name, voice_role, tts_type="0", recogn_type="0",
+                              fix_punc=False, translate_type="0"):
+    """recogn_type = kênh nhận dạng giọng nói của pyvideotrans (xem
+    videotrans/recognition/__init__.py): 0=faster-whisper, 4=FireRedASR,
+    20=ElevenLabs Scribe. model_name chỉ có nghĩa với faster-whisper; các kênh
+    khác bỏ qua nó nhưng CLI vẫn bắt buộc có giá trị hợp lệ."""
     stage = "pyvideotrans transcribe/dịch/dub"
+    tune_segmentation()
     pvt_out = work_dir / "pvt_out"
     pvt_out.mkdir(exist_ok=True)
     run([
         *PVT_CMD_BASE, "--task", "vtv",
         "--name", str(input_video),
-        "--recogn_type", "0",
-        "--model_name", model_name,
+        "--recogn_type", str(recogn_type),
+        "--model_name", model_name or "large-v3",
         "--source_language_code", source_lang,
         "--target_language_code", target_lang,
-        "--translate_type", "0",
+        "--translate_type", str(translate_type),
         "--tts_type", str(tts_type),
         "--voice_role", voice_role,
         "--subtitle_type", "0",
         "--voice_autorate",
         "--output-dir", str(pvt_out),
         "--verbose",
-    ], cwd=PVT_DIR, stage=stage)
+    ] + (["--fix_punc"] if fix_punc else []), cwd=PVT_DIR, stage=stage, tail_lines=40)
 
     dub_audio = pvt_out / f"{target_lang}.m4a"
     dub_srt = pvt_out / f"{target_lang}.srt"
@@ -260,6 +943,19 @@ def transcribe_translate_dub(input_video, work_dir, source_lang, target_lang,
             f"Không sinh ra file mong đợi trong {pvt_out} (cần {dub_audio.name} + {dub_srt.name}). "
             f"Kiểm tra lại mã ngôn ngữ (--source-lang/--target-lang) và voice_role có hợp lệ không.",
         )
+
+    st = sanitize_translated_srt(dub_srt, source_srt=pvt_out / f"{source_lang}.srt",
+                                 translate_type=str(translate_type))
+    if str(translate_type) == TRANS_OLLAMA:
+        # Trả RAM TRƯỚC bước dub + ghép video, nếu không máy 24 GB sẽ bị OOM.
+        ollama_unload()
+    if st["unwrapped"] or st["cut_alt"] or st["cjk"]:
+        print(f"[sạch] {st['cues']} cue: bóc vỏ {st['unwrapped']}, cắt phương án thừa "
+              f"{st['cut_alt']}, lọt chữ Hán {st['cjk']} (dịch lại được {st['fixed']}, "
+              f"phải xoá {st['stripped']})", flush=True)
+        # Bản dub Edge-TTS do pyvideotrans sinh TRƯỚC bước này nên vẫn đọc theo
+        # bản chưa sạch; phụ đề thì đã đúng. Đường ElevenLabs/F5 dựng lại giọng
+        # TỪ file vừa làm sạch nên sạch cả tiếng lẫn chữ.
     return dub_audio, dub_srt
 
 
@@ -339,6 +1035,119 @@ def synthesize_clone_dub(dub_srt, ref_wav, ref_text, work_dir, device=None):
     return out_wav, (out_srt if out_srt.exists() else None)
 
 
+# --- Cắt phụ đề dài thành nhiều dòng chạy tuần tự -----------------------------
+# FireRedASR/Scribe có thể trả 1 câu dài nhiều giây; đổ nguyên khối vào ô blur thì
+# libass xuống dòng thành 7-8 dòng che kín màn hình. Cắt nhỏ theo số ký tự vừa ô
+# rồi chia lại thời gian theo độ dài từng mẩu -> chữ chạy tuần tự, mỗi lúc 1-2 dòng.
+SUB_MAX_LINES = 2
+SUB_MIN_MS = 600          # dưới ngưỡng này người xem không kịp đọc
+_SENT_END = (".", "?", "!", ";", ":", "…", ",")
+
+
+def _srt_ts_to_ms(ts):
+    hh, mm, rest = ts.split(":")
+    ss, ms = rest.replace(".", ",").split(",")
+    return ((int(hh) * 60 + int(mm)) * 60 + int(ss)) * 1000 + int(ms)
+
+
+def _ms_to_srt_ts(ms):
+    ms = max(0, int(ms))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    sec, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+
+
+def parse_srt(path):
+    """-> [(start_ms, end_ms, text)] . Bỏ qua block hỏng thay vì ném lỗi: 1 dòng
+    xấu không đáng làm hỏng cả video."""
+    out = []
+    raw = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    for block in re.split(r"\n\s*\n", raw.strip()):
+        lines = [l for l in block.splitlines() if l.strip()]
+        if len(lines) < 2:
+            continue
+        tl = next((l for l in lines if "-->" in l), None)
+        if not tl:
+            continue
+        try:
+            a, b = [x.strip() for x in tl.split("-->")]
+            start, end = _srt_ts_to_ms(a), _srt_ts_to_ms(b)
+        except Exception:
+            continue
+        text = " ".join(lines[lines.index(tl) + 1:]).strip()
+        if text:
+            out.append((start, end, text))
+    return out
+
+
+def split_text_chunks(text, max_chars):
+    """Cắt ở ranh giới TỪ, ưu tiên chốt ngay sau dấu câu để mỗi mẩu là một ý trọn."""
+    words = text.split()
+    chunks, cur = [], ""
+    for w in words:
+        cand = f"{cur} {w}".strip()
+        if len(cand) <= max_chars:
+            cur = cand
+            if cur.endswith(_SENT_END) and len(cur) >= max_chars * 0.45:
+                chunks.append(cur)
+                cur = ""
+        else:
+            if cur:
+                chunks.append(cur)
+            cur = w
+    if cur:
+        chunks.append(cur)
+
+    # Gộp mẩu quá ngắn vào mẩu liền kề: để lại 1 từ mồ côi ("Xiaobai") đứng riêng
+    # 1 dòng trông rất xấu. Cho phép vượt max_chars ~15% vì thà 1 dòng hơi dài
+    # còn hơn 1 dòng trống trải.
+    limit = max_chars * 1.15
+    i = 0
+    while i < len(chunks):
+        if len(chunks[i]) >= max_chars * 0.35 or len(chunks) == 1:
+            i += 1
+            continue
+        prev_ok = i > 0 and len(chunks[i - 1]) + 1 + len(chunks[i]) <= limit
+        next_ok = i + 1 < len(chunks) and len(chunks[i]) + 1 + len(chunks[i + 1]) <= limit
+        if prev_ok:
+            chunks[i - 1] = f"{chunks[i - 1]} {chunks.pop(i)}"
+        elif next_ok:
+            chunks[i] = f"{chunks[i]} {chunks.pop(i + 1)}"
+            i += 1
+        else:
+            i += 1
+    return chunks or [text]
+
+
+def split_long_subtitles(srt_path, out_path, max_chars):
+    """Ghi ra .srt mới đã cắt nhỏ. Thời gian chia theo TỈ LỆ ĐỘ DÀI từng mẩu (mẩu
+    dài chữ thì hiện lâu hơn) và không bao giờ lấn sang cue kế tiếp."""
+    cues = parse_srt(srt_path)
+    out = []
+    for start, end, text in cues:
+        if len(text) <= max_chars:
+            out.append((start, end, text))
+            continue
+        parts = split_text_chunks(text, max_chars)
+        total = sum(len(p) for p in parts) or 1
+        dur = max(end - start, len(parts) * SUB_MIN_MS)
+        t = start
+        for i, part in enumerate(parts):
+            share = round(dur * len(part) / total)
+            e = (start + dur) if i == len(parts) - 1 else min(t + share, start + dur)
+            if e - t < SUB_MIN_MS:
+                e = t + SUB_MIN_MS
+            out.append((t, e, part))
+            t = e
+
+    lines = []
+    for i, (start, end, text) in enumerate(out, 1):
+        lines.append(f"{i}\n{_ms_to_srt_ts(start)} --> {_ms_to_srt_ts(end)}\n{text}\n")
+    Path(out_path).write_text("\n".join(lines), encoding="utf-8")
+    return out_path, len(cues), len(out)
+
+
 def build_fixed_ass(srt_path, work_dir, width, height, bottom_pct=15, sub_box=None):
     """Convert srt->ass rồi patch PlayRes + font/margin cho đúng tỉ lệ video thật.
 
@@ -352,7 +1161,25 @@ def build_fixed_ass(srt_path, work_dir, width, height, bottom_pct=15, sub_box=No
     """
     stage = "Tạo phụ đề mới đúng vị trí"
     ass_path = work_dir / "fixed.ass"
-    run([FFMPEG_BIN, "-y", "-i", str(srt_path), str(ass_path)], stage=stage)
+
+    # Số ký tự tối đa cho 1 lần hiện, suy từ bề ngang thật của chỗ đặt chữ và cỡ
+    # chữ sẽ dùng bên dưới (Arial: bề ngang trung bình ~0.5 * fontsize). Tính
+    # trước để cắt .srt rồi mới đổi sang .ass -> mỗi cue chỉ còn 1-2 dòng.
+    if sub_box is not None:
+        _ymin, _ymax, _xmin, _xmax = sub_box
+        _fs = max(14, round(max(1, _ymax - _ymin) * 0.40))
+        _avail = max(1, _xmax - _xmin)
+    else:
+        _fs = max(16, round(height * 0.035))
+        _avail = max(1, round(width * 0.92))
+    max_chars = max(12, int(_avail / (_fs * 0.52)) * SUB_MAX_LINES)
+
+    split_srt = work_dir / "split.srt"
+    _, _before, _after = split_long_subtitles(srt_path, split_srt, max_chars)
+    print(f"[phụ đề] tối đa {max_chars} ký tự/lần hiện -> {_before} cue thành {_after} cue",
+          flush=True)
+
+    run([FFMPEG_BIN, "-y", "-i", str(split_srt), str(ass_path)], stage=stage)
 
     if not ass_path.exists():
         raise PipelineStageError(stage, f"ffmpeg không sinh ra file .ass: {ass_path}")

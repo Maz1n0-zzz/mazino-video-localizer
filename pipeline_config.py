@@ -18,6 +18,11 @@ DEFAULTS = {
     # 0 = tắt hẳn tiếng gốc (hành vi cũ), 100 = giữ nguyên. Mặc định 30% để nhạc
     # nền/tiếng động hiện trường còn nghe được nhưng không lấn giọng dub.
     "original_volume_pct": 30,
+    # Engine dịch. Đo trên 58 cue thật của 1 video: Google sai bản chất (块钱 ->
+    # "đô la", 张若雪 -> "Zhang Ruoxue", 白天蓬 -> "Trời nóng vào ban ngày",
+    # xưng hô "Bạn" cho nhóm bạn trẻ). Gemini 0 lỗi bỏ dịch và hiểu được ý mỉa
+    # mai; Qwen14b kém hơn 1 bậc nhưng không giới hạn quota -> để dự phòng.
+    "trans_engine": "gemini",
 }
 
 
