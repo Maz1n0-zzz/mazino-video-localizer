@@ -127,8 +127,32 @@
           </div>
         </div>
         <div class="opt-row">
-          <div class="opt-label"><span class="ic" id="icon-gauge"></span><span>Whisper model (STT)</span></div>
+          <div class="opt-label"><span class="ic" id="icon-gauge"></span><span>Model nhận dạng giọng nói (STT)</span></div>
           <select id="model_name" class="opt-pill"></select>
+        </div>
+        <p class="region-hint" id="asr-zh-note" style="display:none">
+          Tiếng gốc là tiếng Trung nên bắt buộc dùng FireRedASR — Whisper nghe khẩu ngữ tiếng Trung
+          rất kém (ra chữ vô nghĩa và cắt câu vụn làm hỏng bản dịch). Vẫn có thể đổi sang
+          ElevenLabs Scribe nếu chấp nhận trả phí.
+        </p>
+        <div id="asr-el-panel" style="display:none">
+          <p class="region-hint">ElevenLabs Scribe tính phí theo phút audio và cần mạng. Dùng chung
+            API key với giọng đọc ElevenLabs — đã nhập ở trên thì không cần nhập lại.</p>
+          <input type="password" id="asr-el-api-key" class="opt-pill" placeholder="ElevenLabs API key">
+        </div>
+        <div class="opt-row">
+          <div class="opt-label"><span class="ic" id="icon-globe"></span><span>Engine dịch</span></div>
+          <select id="trans_engine" class="opt-pill"></select>
+        </div>
+        <div id="gemini-panel" style="display:none">
+          <p class="region-hint">Gemini có bậc miễn phí, không cần thẻ. Lấy key tại
+            <b>aistudio.google.com/apikey</b> rồi dán vào đây (chỉ cần nhập 1 lần).</p>
+          <input type="password" id="gemini-api-key" class="opt-pill" placeholder="Gemini API key">
+        </div>
+        <div id="ollama-panel" style="display:none">
+          <p class="region-hint">Ollama chạy hoàn toàn trên máy, miễn phí và không cần mạng.
+            Nếu danh sách trống: mở Terminal gõ <b>ollama serve</b>, rồi <b>ollama pull qwen2.5:7b</b>.</p>
+          <select id="ollama-model" class="opt-pill"></select>
         </div>
         <div class="opt-row">
           <div class="opt-label"><span class="ic" id="icon-heart"></span><span>Chế độ xoá sub cũ (VSR)</span></div>
@@ -148,6 +172,7 @@
       </div>
 
       <button id="run-btn" class="run-btn"><span class="ic" id="icon-play"></span>Chạy pipeline</button>
+      <button id="stop-btn" class="stop-btn" type="button">■ Ngưng chạy</button>
       <div class="save-default"><a href="#" id="save-default-link">Lưu làm mặc định</a></div>
     </div>
 

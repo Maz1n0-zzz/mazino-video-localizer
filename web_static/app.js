@@ -49,6 +49,14 @@ const els = {
   targetLang: document.getElementById("target_lang"),
   voiceRole: document.getElementById("voice_role"),
   modelName: document.getElementById("model_name"),
+  asrElPanel: document.getElementById("asr-el-panel"),
+  asrElApiKey: document.getElementById("asr-el-api-key"),
+  asrZhNote: document.getElementById("asr-zh-note"),
+  transEngine: document.getElementById("trans_engine"),
+  geminiPanel: document.getElementById("gemini-panel"),
+  geminiApiKey: document.getElementById("gemini-api-key"),
+  ollamaPanel: document.getElementById("ollama-panel"),
+  ollamaModel: document.getElementById("ollama-model"),
   inpaintMode: document.getElementById("inpaint_mode"),
   fileInput: document.getElementById("file-input"),
   uploadBtn: document.getElementById("upload-btn"),
@@ -56,6 +64,7 @@ const els = {
   dropzoneEmpty: document.getElementById("dropzone-empty"),
   previewVideo: document.getElementById("preview-video"),
   runBtn: document.getElementById("run-btn"),
+  stopBtn: document.getElementById("stop-btn"),
   logBox: document.getElementById("log-box"),
   resultBox: document.getElementById("result-box"),
   resultVideo: document.getElementById("result-video"),
@@ -123,6 +132,7 @@ function updateTtsEngine() {
   }
 }
 els.ttsEngine.addEventListener("change", updateTtsEngine);
+els.ttsEngine.addEventListener("change", () => updateAsrPanel());
 
 // Nhớ thông tin ElevenLabs trong trình duyệt (khỏi nhập lại mỗi lần)
 ["elApiKey", "elVoiceId", "elModel"].forEach((k) => {
@@ -194,6 +204,44 @@ function setRegionType(t) {
   els.modeLogoBtn.classList.toggle("ghost", t !== "logo");
 }
 
+// Engine STT đang chọn được mã hoá trong value dropdown ("whisper:large-v3",
+// "firered:", "elevenlabs:") -> tách ra để biết khi nào phải hiện ô API key.
+let elKeySaved = false;
+
+function asrEngine() {
+  return (els.modelName.value || "").split(":")[0];
+}
+
+function updateAsrPanel() {
+  // Scribe dùng CHUNG key với giọng đọc ElevenLabs. Chỉ bắt nhập khi: chọn Scribe
+  // + máy chưa lưu key + giọng đọc không phải ElevenLabs.
+  const needKey =
+    asrEngine() === "elevenlabs" &&
+    !elKeySaved &&
+    els.ttsEngine.value !== "elevenlabs";
+  els.asrElPanel.style.display = needKey ? "block" : "none";
+}
+els.modelName.addEventListener("change", updateAsrPanel);
+
+// Engine dịch: Gemini cần key (1 lần), Ollama cần server chạy sẵn trên máy.
+let geminiKeySaved = false;
+
+function updateTransPanel() {
+  const v = els.transEngine.value;
+  els.geminiPanel.style.display = v === "gemini" && !geminiKeySaved ? "block" : "none";
+  els.ollamaPanel.style.display = v === "ollama" ? "block" : "none";
+}
+els.transEngine.addEventListener("change", updateTransPanel);
+
+async function refreshAsrChoices(lang) {
+  const res = await fetch(`/api/asr-choices?lang=${encodeURIComponent(lang)}`);
+  const data = await res.json();
+  elKeySaved = !!data.el_key_saved;
+  fillSelect(els.modelName, data.asr_choices, data.asr_default);
+  els.asrZhNote.style.display = data.is_chinese ? "block" : "none";
+  updateAsrPanel();
+}
+
 function fillSelect(select, options, value) {
   select.innerHTML = "";
   options.forEach((opt) => {
@@ -218,7 +266,11 @@ async function loadConfig() {
   cfgCache = data.config;
   fillSelect(els.sourceLang, data.lang_choices, data.config.source_lang);
   fillSelect(els.targetLang, data.lang_choices, data.config.target_lang);
-  fillSelect(els.modelName, data.model_choices, data.config.model_name);
+  elKeySaved = !!data.el_key_saved;
+  fillSelect(els.modelName, data.asr_choices, data.asr_default);
+  els.asrZhNote.style.display = (data.config.source_lang || "").toLowerCase().startsWith("zh")
+    ? "block"
+    : "none";
   fillSelect(els.inpaintMode, data.inpaint_choices, data.config.inpaint_mode);
   edgeVoices = data.voices || [];
   cloneVoices = data.clone_voices || [];
@@ -233,9 +285,17 @@ async function loadConfig() {
       ? "Clone giọng từ file mẫu (F5-TTS)"
       : "Clone giọng (F5-TTS) — chưa cài trên bản này";
   }
+  geminiKeySaved = !!data.gemini_key_saved;
+  fillSelect(els.transEngine, data.trans_choices, data.trans_default);
+  const om = data.ollama_models || [];
+  fillSelect(els.ollamaModel, om.length ? om : [["", "chưa có model — chạy: ollama pull qwen2.5:7b"]], om[0]);
   updateTtsEngine();  // populate dropdown giọng đúng theo engine đang chọn
+  updateAsrPanel();
+  updateTransPanel();
 }
 loadConfig();
+
+els.sourceLang.addEventListener("change", () => refreshAsrChoices(els.sourceLang.value));
 
 els.targetLang.addEventListener("change", async () => {
   const res = await fetch(`/api/voices?lang=${encodeURIComponent(els.targetLang.value)}`);
@@ -401,10 +461,28 @@ function appendLog(line) {
   els.logBox.scrollTop = els.logBox.scrollHeight;
 }
 
+let currentJobId = null;
+
 function setRunning(isRunning) {
   els.runBtn.disabled = isRunning;
   els.cancelVideoBtn.disabled = isRunning;
+  els.stopBtn.classList.toggle("visible", isRunning);
+  els.stopBtn.disabled = false;
+  els.stopBtn.textContent = "\u25a0 Ngưng chạy";
+  if (!isRunning) currentJobId = null;
 }
+
+els.stopBtn.addEventListener("click", async () => {
+  if (!currentJobId) return;
+  els.stopBtn.disabled = true;
+  els.stopBtn.textContent = "Đang ngưng...";
+  try {
+    await fetch(`/api/cancel/${currentJobId}`, { method: "POST" });
+  } catch (err) {
+    appendLog(`[LỖI] không gửi được lệnh ngưng: ${err}`);
+    els.stopBtn.disabled = false;
+  }
+});
 
 els.runBtn.addEventListener("click", async () => {
   if (!selectedFile) {
@@ -419,7 +497,18 @@ els.runBtn.addEventListener("click", async () => {
   form.append("video", selectedFile);
   form.append("source_lang", els.sourceLang.value);
   form.append("target_lang", els.targetLang.value);
-  form.append("model_name", els.modelName.value);
+  form.append("asr_choice", els.modelName.value);
+  // model_name vẫn gửi để tương thích: chỉ có nghĩa khi engine là Whisper.
+  form.append("model_name", asrEngine() === "whisper" ? els.modelName.value.split(":")[1] || "large-v3" : "");
+  if (asrEngine() === "elevenlabs") {
+    form.append("asr_el_api_key", els.asrElApiKey.value.trim());
+  }
+  form.append("trans_engine", els.transEngine.value);
+  if (els.transEngine.value === "gemini") {
+    form.append("gemini_api_key", els.geminiApiKey.value.trim());
+  } else if (els.transEngine.value === "ollama") {
+    form.append("ollama_model", els.ollamaModel.value);
+  }
   form.append("voice_role", els.voiceRole.value);
   form.append("inpaint_mode", els.inpaintMode.value);
   form.append("subtitle_bottom_pct", els.subtitleBottomPct.value || "15");
@@ -458,6 +547,7 @@ els.runBtn.addEventListener("click", async () => {
   try {
     const res = await fetch("/api/run", { method: "POST", body: form });
     const { job_id } = await res.json();
+    currentJobId = job_id;
     const es = new EventSource(`/api/progress/${job_id}`);
     es.onmessage = (e) => {
       const data = JSON.parse(e.data);
@@ -477,6 +567,10 @@ els.runBtn.addEventListener("click", async () => {
       }
       es.close();
     });
+    es.addEventListener("cancelled", () => {
+      setRunning(false);
+      es.close();
+    });
     es.addEventListener("error", () => {
       setRunning(false);
       es.close();
@@ -492,7 +586,10 @@ els.saveDefaultLink.addEventListener("click", async (e) => {
   const payload = {
     source_lang: els.sourceLang.value,
     target_lang: els.targetLang.value,
-    model_name: els.modelName.value,
+    model_name: asrEngine() === "whisper"
+      ? els.modelName.value.split(":")[1] || "large-v3"
+      : cfgCache.model_name,
+    trans_engine: els.transEngine.value,
     voice_role: els.voiceRole.value,
     inpaint_mode: els.inpaintMode.value,
     subtitle_bottom_pct: parseInt(els.subtitleBottomPct.value || "15", 10),
