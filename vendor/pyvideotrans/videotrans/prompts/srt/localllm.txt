@@ -36,10 +36,10 @@ go to the hospital right now.
 *WRONG OUTPUT (merged, too long, semantic completion):*
 1
 00:00:01,000 --> 00:00:02,500
-[Complete, merged translation of "I think I'm gonna go to the hospital right now" inside Block 1]
+Complete, merged translation of "I think I'm gonna go to the hospital right now" inside Block 1
 2
 00:00:02,600 --> 00:00:04,000
-[Empty, deleted, or repeated]
+Empty, deleted, or repeated
 
 *CORRECT OUTPUT (Target: Spanish – concise, zero-shifted, ellipsis bridged, spoken style):*
 <TRANSLATE_TEXT>
@@ -55,6 +55,56 @@ Creo que voy a...
 ---
 
 {GLOSSARY_DICT}
+
+
+# VIETNAMESE-SPECIFIC RULES (HIGHEST PRIORITY — override anything above that conflicts)
+
+## Xưng hô (pronouns) — quan trọng nhất
+Vietnamese has no neutral "you". Choosing wrong makes the dub sound robotic.
+- NEVER default to "Bạn"/"bạn" unless the speakers are actually strangers being polite.
+- Young friends joking, teasing, arguing (the common case in short-form video):
+  use "mày/tao", "ông/tôi", "bà/tôi", or bare imperatives with no pronoun at all.
+- Speaking to an older man/peer casually: "anh"; to an older woman: "chị";
+  to a younger person: "em". Keep the SAME pronoun pair for the same speaker
+  across the whole file — do not switch halfway.
+- Chinese vocatives 大哥/哥/姐/兄弟 are usually just casual address, NOT literal
+  family: render as "ông ơi", "anh ơi", "bà ơi", "thằng bạn" — never "Anh lớn".
+
+## Tên riêng (proper nouns)
+- Use the Sino-Vietnamese (Hán-Việt) reading, NEVER pinyin romanisation.
+  小白 -> "Tiểu Bạch" (never "Xiaobai"); 张若雪 -> "Trương Nhược Tuyết"
+  (never "Zhang Ruoxue"); 白天鹏 -> "Bạch Thiên Bằng".
+- Once you pick a rendering for a name, reuse it identically everywhere.
+
+## Tiền tệ, số, đơn vị
+- 块 / 块钱 / 元 / 人民币 = "tệ" (NEVER "đô la", never "nhân dân tệ" in speech).
+- Read decimals the Vietnamese way: 65.3度 -> "65 phẩy 3 độ".
+
+## Tiếng lóng & meme
+Translate the MEANING, never word-by-word. If a Chinese internet slang term has
+no Vietnamese equivalent, use a short natural Vietnamese phrase with the same
+punch. Example: 雪糕刺客 is not "sát thủ kem" — it means ice cream that turns out
+shockingly expensive at checkout -> "kem chém giá" / "kem cắt cổ".
+
+## Văn phong
+- Spoken Vietnamese as heard in vlogs and street videos, not textbook Vietnamese.
+- Keep interjections alive: 哎呀 -> "Ối giời", 妈呀 -> "Má ơi", 卧槽 -> "Vãi".
+- Drop the machine-translation tics: never "Bạn có thể vui lòng...",
+  never "Bạn chưa bao giờ nhìn thấy điều này trước đây".
+- Do not translate filler that adds nothing (啊/呢/吧 at sentence end) literally.
+
+## Định dạng đầu ra — ĐỌC KỸ (đã làm hỏng job thật)
+- Output the translation text and NOTHING else. Never wrap a line in angle
+  brackets, square brackets, parentheses, quotes or any tag. The placeholder
+  examples earlier in this prompt use wrappers ONLY to mark "put text here" —
+  those wrappers are NOT part of the expected output. Copying them is a FATAL
+  ERROR: the dubbing engine reads a wrapped line as markup, speaks nothing, and
+  the whole job crashes.
+- Give exactly ONE translation per line. Never offer alternatives separated by
+  "|" or "/". Pick the best one and output only that.
+- Never leave Chinese, Japanese or Korean characters in the output — not even a
+  single one, not even inside an otherwise Vietnamese sentence. If a word is
+  hard, translate its meaning; never copy the source characters through.
 
 # ACTUAL TASK
 Translate and adapt ONLY the following SRT batch into {lang}.
