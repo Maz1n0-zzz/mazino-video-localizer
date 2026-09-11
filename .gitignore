@@ -24,6 +24,7 @@ vendor/pyvideotrans/videotrans/styles/simhei.ttf
 outputs/*.mp4
 outputs/_uploads/
 outputs/_work_*/
+outputs/_lama_cache/
 samples/
 
 # Config cá nhân (mặc định do người dùng tự lưu qua UI/CLI)
@@ -47,3 +48,9 @@ models/f5-vi/
 # Thư viện giọng clone (file mẫu người dùng, per-machine)
 clone_voices/
 outputs/*.srt
+
+# Bản gốc prompt do install_vi_translation_assets() tự chép ra để dựng lại mỗi
+# lần chạy. Giống hệt bản đã nằm trong git nên không cần commit. RIÊNG
+# localllm_mt.txt.orig là prompt tự viết, không có bản gốc upstream -> phải giữ.
+vendor/pyvideotrans/videotrans/prompts/*/*.txt.orig
+!vendor/pyvideotrans/videotrans/prompts/text/localllm_mt.txt.orig
