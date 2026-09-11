@@ -913,6 +913,23 @@ def _strip_wrappers(text):
     return t
 
 
+def _co_chu_dinh(text):
+    """Chu thuong dinh NGAY chu HOA, khong dau cach -> manh ngoai ngu bi dan vao.
+
+    Do 11/9/2026: qwen2.5:7b tra ve "...ghe o to nay da sach het roi, lam
+    saoRepair it? ..." - mot manh tieng Anh dinh vao giua cau tieng Viet. Loai
+    loi nay di thang vao video vi khong buoc nao sau do bat duoc.
+
+    Tieng Viet khong bao gio co chu thuong dinh lien chu hoa trong cung mot tu,
+    nen luat nay rat sac. Do tren 313 dong phu de that (4 file, ca ban truoc va
+    sau khi soat): bao dung 1 dong, va do chinh la dong hong. Khong bao nham
+    lan nao. Ngoai le co the gap la ten thuong hieu kieu "iPhone"; bi chan thi
+    chi giu nguyen cau cu, khong mat gi.
+    """
+    return any(text[i].islower() and text[i + 1].isupper()
+               for i in range(len(text) - 1))
+
+
 def _candidate_ok(cand, ask):
     """Ban dich lai chi dung duoc khi khong nuot mat noi dung.
 
@@ -922,6 +939,8 @@ def _candidate_ok(cand, ask):
     tieng Viet thuong dai hon ban Trung), nen chi chan o cau du dai.
     """
     if not cand:
+        return False
+    if _co_chu_dinh(cand):
         return False
     return not (len(ask) >= 40 and len(cand) < 0.6 * len(ask))
 
