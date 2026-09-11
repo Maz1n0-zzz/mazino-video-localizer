@@ -62,6 +62,7 @@ const els = {
   ollamaPanel: document.getElementById("ollama-panel"),
   ollamaModel: document.getElementById("ollama-model"),
   inpaintMode: document.getElementById("inpaint_mode"),
+  theLoai: document.getElementById("the_loai"),
   fileInput: document.getElementById("file-input"),
   uploadBtn: document.getElementById("upload-btn"),
   dropzone: document.getElementById("dropzone"),
@@ -296,6 +297,7 @@ async function loadConfig() {
     ? "block"
     : "none";
   fillSelect(els.inpaintMode, data.inpaint_choices, data.config.inpaint_mode);
+  fillSelect(els.theLoai, data.the_loai_choices, data.config.the_loai || "");
   edgeVoices = data.voices || [];
   cloneVoices = data.clone_voices || [];
   els.subtitleBottomPct.value = data.subtitle_bottom_pct ?? data.config.subtitle_bottom_pct ?? 15;
@@ -540,6 +542,7 @@ els.runBtn.addEventListener("click", async () => {
   }
   form.append("voice_role", els.voiceRole.value);
   form.append("inpaint_mode", els.inpaintMode.value);
+  form.append("the_loai", els.theLoai.value);
   form.append("subtitle_bottom_pct", els.subtitleBottomPct.value || "15");
   form.append("original_volume_pct", els.originalVolumePct.value || "30");
   // Khối CHE SUB to nhất (nếu có) -> nơi đặt sub mới. Các khối còn lại chỉ blur.
@@ -621,6 +624,7 @@ els.saveDefaultLink.addEventListener("click", async (e) => {
     trans_engine: els.transEngine.value,
     voice_role: els.voiceRole.value,
     inpaint_mode: els.inpaintMode.value,
+    the_loai: els.theLoai.value,
     subtitle_bottom_pct: parseInt(els.subtitleBottomPct.value || "15", 10),
     original_volume_pct: parseInt(els.originalVolumePct.value || "30", 10),
   };

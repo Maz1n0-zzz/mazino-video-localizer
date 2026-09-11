@@ -500,6 +500,18 @@ def get_asr_choices(lang: str = ""):
     }
 
 
+# Nhãn hiển thị cho dropdown thể loại. Khoá phải khớp orch.THE_LOAI.
+THE_LOAI_CHOICES = [
+    ("", "— Không chỉ định —"),
+    ("tu-tien", "Tu tiên / Tiên hiệp"),
+    ("kiem-hiep", "Kiếm hiệp / Võ hiệp"),
+    ("do-thi", "Đô thị / Hiện đại"),
+    ("ngon-tinh", "Ngôn tình / Lãng mạn"),
+    ("hai-doi-thuong", "Hài / Đời thường"),
+    ("am-thuc", "Ẩm thực / Nấu ăn"),
+]
+
+
 @app.get("/api/config")
 def get_config():
     cfg = load_config()
@@ -520,6 +532,7 @@ def get_config():
         "paid_models": {k: orch.get_paid_model(e) for k, e in PAID_UI.items()},
         "ollama_models": orch.ollama_models(),
         "inpaint_choices": INPAINT_CHOICES,
+        "the_loai_choices": THE_LOAI_CHOICES,
         "voices": voices_for_lang(cfg["target_lang"]),
         "subtitle_bottom_pct": cfg.get("subtitle_bottom_pct", 15),
         "original_volume_pct": cfg.get("original_volume_pct", 30),
@@ -608,6 +621,7 @@ async def run_pipeline(
     model_name: str = Form(""),   # chỉ có nghĩa khi engine STT là Whisper
     voice_role: str = Form(...),
     inpaint_mode: str = Form(...),
+    the_loai: str = Form(""),
     sub_areas: str = Form(""),
     subtitle_bottom_pct: int = Form(15),
     original_volume_pct: int = Form(30),
@@ -707,6 +721,13 @@ async def run_pipeline(
                 status_code=400,
             )
         orch.set_paid_config(e, key or None, paid_model.strip() or None)
+
+    # Thể loại đi qua config.json chứ không luồn theo tham số: viet_hoa_srt() vốn
+    # đã tự đọc khoá này khi không được truyền. Luồn qua _run_job phải sửa 5 chỗ,
+    # trong đó có một tuple args dài toàn tham số vị trí — dễ gắn nhầm cột.
+    # shortcut: một job một lúc thì đủ. Chạy song song 2 job khác thể loại sẽ
+    # dùng chung khoá này; lúc nào cần thì luồn theo tham số như inpaint_mode.
+    save_config(the_loai=(the_loai if the_loai in orch.THE_LOAI else ""))
 
     orch.reset_cancel()   # job trước có thể đã bật cờ huỷ
     JOBS[job_id] = {"logs": [], "status": "running", "result": None}
