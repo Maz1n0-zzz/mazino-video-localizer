@@ -13,6 +13,7 @@ Usage:
     python3 orchestrator.py --input <video> --source-lang zh-cn --target-lang vi
 """
 import argparse
+import hashlib
 import json
 import signal
 import threading as _threading
@@ -204,11 +205,60 @@ def run(cmd, cwd=None, stage="", tail_lines=0):
 # model là có thêm 20 lượt.
 QUOTA_MARKERS = ("RESOURCE_EXHAUSTED", "exceeded your current quota",
                  "429", "quota", "rate limit", "rate_limit")
+QUOTA_MARKERS_LOWER = tuple(m.lower() for m in QUOTA_MARKERS)
+
+
+def _chi_phan_loi(text):
+    """Bóc DÒNG LỆNH ra, chỉ giữ phần output thật của tiến trình con.
+
+    PipelineStageError của run() có dạng:
+        Lệnh thất bại (exit code N): <cả dòng lệnh>
+        <40 dòng output cuối>
+    Dòng lệnh chứa tên tham số CLI như --recogn_type, --source_language_code,
+    --target_language_code. Đo thực tế 9/9/2026: so marker trên cả chuỗi làm
+    ENGINE_INDEPENDENT_MARKERS khớp nhầm 4 lần vào chính dòng lệnh -> job hết
+    quota Gemini bị coi là "lỗi ngoài tầng dịch" -> không tụt hạng -> chết oan.
+    """
+    dong = str(text).splitlines()
+    if dong and dong[0].startswith("Lệnh thất bại"):
+        dong = dong[1:]
+    return "\n".join(dong)
 
 
 def is_quota_error(text):
-    t = str(text).lower()
+    t = _chi_phan_loi(text).lower()
     return any(m.lower() in t for m in QUOTA_MARKERS)
+
+
+# Lỗi mà ĐỔI ENGINE DỊCH CHẮC CHẮN KHÔNG CỨU ĐƯỢC -> phải nổi lên ngay, đừng
+# thử lại 4 bậc còn lại cho tốn thêm mỗi bậc ~90 giây ASR.
+#
+# Đây là danh sách ĐEN, cố ý ngược với cách làm ban đầu. Lọc theo danh sách
+# TRẮNG ("chỉ tụt hạng khi khớp mẫu lỗi đã biết") đã sai hai lần trong một tối
+# 8/9/2026: lần đầu không khớp "Gemini result is emtpy", vá xong thì lần sau
+# không khớp "503 UNAVAILABLE ... high demand". Không thể liệt kê hết mọi lỗi
+# mà nhà cung cấp có thể trả về, nên mặc định là TỤT HẠNG; chỉ chặn những thứ
+# nằm rõ ràng ngoài tầng dịch.
+ENGINE_INDEPENDENT_MARKERS = (
+    "ffmpeg", "ffprobe",              # dựng/ghép video
+    "firered", "whisper", "sherpa",   # nhận dạng tiếng nói
+    "语音识别", "recogn",
+    "language_code", "source_language", "target_language",   # mã ngôn ngữ sai
+    "no such file", "filenotfound", "không tìm thấy",
+    "lama", "inpaint", "vsr",         # bước xoá sub
+    "no space left", "disk full",
+)
+
+
+def is_engine_independent_error(text):
+    """True = lỗi nằm ngoài tầng dịch, đổi engine vô ích.
+
+    CHỈ soi phần output thật — xem _chi_phan_loi(). Soi cả dòng lệnh là sai.
+    """
+    t = _chi_phan_loi(text).lower()
+    if any(m in t for m in QUOTA_MARKERS_LOWER):
+        return False          # hết hạn mức thì đổi engine CÓ cứu được
+    return any(m in t for m in ENGINE_INDEPENDENT_MARKERS)
 
 
 def probe_resolution(video_path):
@@ -219,6 +269,109 @@ def probe_resolution(video_path):
     )
     info = json.loads(out.stdout)["streams"][0]
     return info["width"], info["height"]
+
+
+LAMA_CACHE_DIR = PROJECT_ROOT / "outputs" / "_lama_cache"
+LAMA_CACHE_INDEX = LAMA_CACHE_DIR / "index.json"
+
+# Vùng xoá sub do Mazino KHOANH TAY nên không bao giờ trùng khít giữa hai lần.
+# Đo thực tế 9/9/2026 trên cùng một video, ba lần vẽ:
+#     (679,755, 81,515)  (687,774, 86,496)  (688,759, 94,481)
+# Lệch tới 34 px. Làm tròn về lưới thì trượt vì bệnh mép; so sai số đối xứng thì
+# phải nới ngưỡng mãi không biết dừng ở đâu.
+#
+# Luật đúng là hỏi "cache có DÙNG ĐƯỢC cho yêu cầu này không", gồm 2 điều kiện:
+#   1. PHỦ HẾT vùng đang yêu cầu (cho hụt <= COVER_SLACK) -> chỗ cần blur chắc
+#      chắn đã sạch trong bản cache.
+#   2. KHÔNG xoá thừa quá EXTRA_MAX mỗi mép -> không bao giờ trả về bản bị xoá
+#      rộng hơn ý người dùng. Vẽ hẹp lại vì muốn giữ mép nào đó là quyền của
+#      người dùng, cache không được phép ghi đè quyết định đó.
+LAMA_COVER_SLACK = 16
+LAMA_EXTRA_MAX = 64
+
+
+def _hash_video(input_video):
+    h = hashlib.md5()
+    with open(input_video, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _chuan_areas(sub_areas):
+    return sorted(tuple(int(v) for v in a) for a in sub_areas)
+
+
+def _lama_cache_file(input_video, inpaint_mode, sub_areas):
+    """Đường dẫn cache CHÍNH XÁC (dùng để GHI). None nếu không băm được."""
+    try:
+        h = hashlib.md5(_hash_video(input_video).encode("utf-8"))
+        h.update(repr((str(inpaint_mode), _chuan_areas(sub_areas))).encode("utf-8"))
+        return LAMA_CACHE_DIR / f"{h.hexdigest()}.mp4"
+    except Exception:
+        return None
+
+
+def _doc_index():
+    try:
+        return json.loads(LAMA_CACHE_INDEX.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _lama_cache_tim(input_video, inpaint_mode, sub_areas):
+    """Tìm cache DÙNG ĐƯỢC: khớp nội dung video + mode, và mọi toạ độ lệch dưới
+    LAMA_AREA_TOLERANCE. Trả Path hoặc None."""
+    try:
+        vhash = _hash_video(input_video)
+        can = _chuan_areas(sub_areas)
+    except Exception:
+        return None
+    for muc in _doc_index().get(vhash, []):
+        if muc.get("mode") != str(inpaint_mode):
+            continue
+        co = [tuple(a) for a in muc.get("areas", [])]
+        if len(co) != len(can) or not all(_vung_dung_duoc(c, y) for c, y in zip(co, can)):
+            continue
+        f = LAMA_CACHE_DIR / muc.get("file", "")
+        if f.is_file():
+            return f
+    return None
+
+
+def _vung_dung_duoc(co, yeu_cau):
+    """Vùng đã xoá `co` có dùng được cho yêu cầu `yeu_cau` không?
+    Toạ độ dạng (ymin, ymax, xmin, xmax)."""
+    c_y0, c_y1, c_x0, c_x1 = co
+    y_y0, y_y1, y_x0, y_x1 = yeu_cau
+    # 1. phu het (cho hut <= COVER_SLACK o moi mep)
+    if (c_y0 - y_y0 > LAMA_COVER_SLACK or y_y1 - c_y1 > LAMA_COVER_SLACK
+            or c_x0 - y_x0 > LAMA_COVER_SLACK or y_x1 - c_x1 > LAMA_COVER_SLACK):
+        return False
+    # 2. khong xoa thua qua EXTRA_MAX o moi mep
+    if (y_y0 - c_y0 > LAMA_EXTRA_MAX or c_y1 - y_y1 > LAMA_EXTRA_MAX
+            or y_x0 - c_x0 > LAMA_EXTRA_MAX or c_x1 - y_x1 > LAMA_EXTRA_MAX):
+        return False
+    return True
+
+
+def _lama_cache_ghi_index(input_video, inpaint_mode, sub_areas, cache_file):
+    """Ghi thêm 1 mục vào index. Lỗi thì bỏ qua — chỉ mất tối ưu."""
+    try:
+        vhash = _hash_video(input_video)
+        idx = _doc_index()
+        muc = {"mode": str(inpaint_mode),
+               "areas": [list(a) for a in _chuan_areas(sub_areas)],
+               "file": cache_file.name}
+        ds = idx.setdefault(vhash, [])
+        if muc not in ds:
+            ds.append(muc)
+        LAMA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = LAMA_CACHE_INDEX.with_suffix(".json.part")
+        tmp.write_text(json.dumps(idx, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(LAMA_CACHE_INDEX)
+    except Exception as e:
+        print(f"[LaMa] khong ghi duoc index cache: {e}", flush=True)
 
 
 def remove_old_subtitles(input_video, work_dir, inpaint_mode="sttn-auto", sub_areas=None):
@@ -237,6 +390,19 @@ def remove_old_subtitles(input_video, work_dir, inpaint_mode="sttn-auto", sub_ar
     stage = "VSR xoá sub/logo cũ"
     if not sub_areas:
         return input_video
+
+    # Bước này tốn ~47 phút cho video 5 phút, mà work_dir bị rmtree ở finally của
+    # _run_job -> MỌI lỗi phía sau (dịch/dub) đều đập luôn thành quả LaMa. Ngày
+    # 8/9/2026 mất ~2,5 tiếng vì 3 lần chết liên tiếp (OOM, thẻ bọc Gemini, 503).
+    # Cache theo NỘI DUNG video + tham số xoá nên đổi vùng chọn là tự trượt cache.
+    cache_file = _lama_cache_file(input_video, inpaint_mode, sub_areas)
+    dung_lai = (cache_file if cache_file is not None and cache_file.exists()
+                else _lama_cache_tim(input_video, inpaint_mode, sub_areas))
+    if dung_lai is not None:
+        print(f"[LaMa] dùng lại bản đã xoá sub trong cache, bỏ qua bước này: "
+              f"{dung_lai.name}", flush=True)
+        return dung_lai
+
     cleaned = work_dir / "cleaned.mp4"
     cmd = [
         *VSR_CMD_BASE,
@@ -250,6 +416,18 @@ def remove_old_subtitles(input_video, work_dir, inpaint_mode="sttn-auto", sub_ar
     run(cmd, cwd=VSR_DIR, stage=stage)
     if not cleaned.exists():
         raise PipelineStageError(stage, f"Không sinh ra file output mong đợi: {cleaned}")
+    if cache_file is not None:
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            # Ghi ra file tạm rồi mới đổi tên: bị ngắt giữa dòng thì cache không
+            # bao giờ ở trạng thái nửa vời.
+            tmp = cache_file.with_suffix(".part")
+            shutil.copy2(cleaned, tmp)
+            tmp.replace(cache_file)
+            _lama_cache_ghi_index(input_video, inpaint_mode, sub_areas, cache_file)
+            print(f"[LaMa] đã lưu cache: {cache_file.name}", flush=True)
+        except Exception as e:
+            print(f"[LaMa] không lưu được cache (không sao, chỉ mất tối ưu): {e}", flush=True)
     return cleaned
 
 
@@ -386,8 +564,61 @@ def set_elevenlabs_config(api_key, voice_id, model="eleven_multilingual_v2", nam
 # "Xiaobai" chỗ kia). Hai kênh LLM nhận CẢ BATCH srt nên giữ được mạch hội thoại,
 # lại đọc được prompt + glossary do ta soạn.
 TRANS_GOOGLE = "0"
+TRANS_CHATGPT = "4"
+TRANS_DEEPSEEK = "5"
 TRANS_GEMINI = "6"
 TRANS_OLLAMA = "9"
+TRANS_OPENROUTER = "10"
+
+# Ba kênh TRẢ PHÍ, dùng khi chưa có model offline đủ tốt. Cùng một khuôn
+# (key + tên model) nên gom vào một bảng thay vì viết 3 hàm gần giống nhau.
+# Model mặc định lấy nguyên từ params.json của pyvideotrans — KHÔNG tự bịa
+# tên model, vì đoán sai thì API trả 404 và job chết giữa chừng.
+#
+# TỐN TIỀN THẬT: các kênh này chỉ chạy khi người dùng CHỦ ĐỘNG chọn. Chuỗi tụt
+# hạng không bao giờ tự nhảy vào đây — xem _translation_plan() ở web_server.
+PAID_TRANS = {
+    TRANS_CHATGPT: {
+        "ten": "OpenAI", "key": "chatgpt_key", "model": "chatgpt_model",
+        "mac_dinh": "gpt-5.5", "them": {"chatgpt_api": "https://api.openai.com/v1"},
+    },
+    TRANS_DEEPSEEK: {
+        "ten": "DeepSeek", "key": "deepseek_key", "model": "deepseek_model",
+        "mac_dinh": "deepseek-v4-pro", "them": {},
+    },
+    TRANS_OPENROUTER: {
+        "ten": "OpenRouter", "key": "openrouter_key", "model": "openrouter_model",
+        "mac_dinh": "minimax/minimax-m2.7", "them": {},
+    },
+}
+
+
+def get_paid_key(engine):
+    cfg = PAID_TRANS.get(engine)
+    if not cfg:
+        return ""
+    return (_read_pvt_param(cfg["key"], "") or "").strip()
+
+
+def get_paid_model(engine):
+    cfg = PAID_TRANS.get(engine)
+    if not cfg:
+        return ""
+    return (_read_pvt_param(cfg["model"], "") or "").strip() or cfg["mac_dinh"]
+
+
+def set_paid_config(engine, api_key=None, model=None):
+    """Ghi key + model cho 1 kênh trả phí vào params.json của pyvideotrans."""
+    cfg = PAID_TRANS.get(engine)
+    if not cfg:
+        return False
+    kv = dict(cfg["them"])
+    if api_key:
+        kv[cfg["key"]] = api_key.strip()
+    kv[cfg["model"]] = (model or "").strip() or get_paid_model(engine)
+    _write_pvt_params(**kv)
+    set_ai_batch(AI_BATCH_GEMINI, send_srt=False)
+    return True
 
 OLLAMA_API = "http://localhost:11434/v1"
 # 14b chứ không phải 7b: đo 3 lượt trên 58 cue thật, 7b LỆCH DÒNG mọi lượt
@@ -505,19 +736,26 @@ def install_vi_translation_assets(overwrite_glossary=False):
     tới được máy đã chạy một lần — prompt đứng im ở phiên bản đầu tiên.
     """
     done = []
-    targets = [(kind, name) for kind in ("srt", "text") for name in ("gemini", "localllm")]
+    # chatgpt/deepseek/openrouter: 3 kenh tra phi Mazino them ngay 09/09 - truoc
+    # do KHONG duoc tiem luat tieng Viet nen dich ra van "ban", ten rieng pinyin.
+    _KENH = ("gemini", "localllm", "chatgpt", "deepseek", "openrouter")
+    targets = [(kind, name) for kind in ("srt", "text") for name in _KENH]
+    # localllm_mt: prompt rieng cho model DICH CHUYEN DUNG (Hunyuan-MT, Qwen-MT...).
+    # Chi co ban text vi che do line-mode (aisendsrt=False) moi dung no.
+    targets.append(("text", "localllm_mt"))
     for kind, name in targets:
         f = PVT_DIR / "videotrans" / "prompts" / kind / f"{name}.txt"
-        if not f.exists():
-            continue
         orig = f.with_suffix(".txt.orig")
+        # localllm_mt chi co .orig do minh viet ra; ban .txt duoc sinh o duoi.
+        if not f.exists() and not orig.exists():
+            continue
         if not orig.exists():
             orig.write_text(f.read_text(encoding="utf-8-sig"), encoding="utf-8")
         base, n_fix = _defuse_bracket_examples(orig.read_text(encoding="utf-8-sig"))
         cut = "# ACTUAL TASK"
         text = (base.replace(cut, VI_PROMPT_RULES + "\n" + cut, 1)
                 if cut in base else base + VI_PROMPT_RULES)
-        if text != f.read_text(encoding="utf-8-sig", errors="replace"):
+        if not f.exists() or text != f.read_text(encoding="utf-8-sig", errors="replace"):
             f.write_text(text, encoding="utf-8")
             done.append(f"{kind}/{name} (bóc ngoặc {n_fix} dòng ví dụ)")
 
@@ -595,7 +833,12 @@ def set_ollama_config(model=OLLAMA_DEFAULT_MODEL, api_url=OLLAMA_API):
     set_ai_batch(AI_BATCH_OLLAMA, send_srt=False)
 
 
-def ollama_unload(model=None):
+def get_ollama_model():
+    """Model Ollama DANG duoc cau hinh (do nguoi dung chon o UI). '' neu chua co."""
+    return (_read_pvt_param("localllm_model", "") or "").strip()
+
+
+def ollama_unload(model=None, ly_do="trước bước lồng tiếng"):
     """Đẩy model Ollama ra khỏi RAM ngay, không đợi hết keep_alive mặc định (5 phút).
 
     qwen2.5:14b chiếm 8,4 GB và Ollama giữ nguyên trong RAM suốt job. Máy 24 GB
@@ -615,7 +858,7 @@ def ollama_unload(model=None):
             method="POST", headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=30):
             pass
-        print(f"[RAM] đã đẩy {model} khỏi bộ nhớ (~8 GB) trước bước lồng tiếng", flush=True)
+        print(f"[RAM] đã đẩy {model} khỏi bộ nhớ {ly_do}", flush=True)
         return True
     except Exception as e:
         print(f"[RAM] không đẩy được model Ollama khỏi bộ nhớ: {e}", flush=True)
@@ -716,7 +959,7 @@ def _read_pvt_param(key, default=""):
         return default
 
 
-def _llm_once(prompt, translate_type, timeout=120):
+def _llm_once(prompt, translate_type, timeout=120, model=None):
     """Gọi thẳng engine dịch cho MỘT câu hỏi. -> text, hoặc None nếu không gọi được.
 
     Cố tình không đi qua pyvideotrans: ở đây chỉ cần dịch lại vài dòng lẻ, dựng
@@ -726,7 +969,7 @@ def _llm_once(prompt, translate_type, timeout=120):
     import urllib.request
     try:
         if translate_type == TRANS_OLLAMA:
-            body = {"model": _read_pvt_param("localllm_model", OLLAMA_DEFAULT_MODEL),
+            body = {"model": model or _read_pvt_param("localllm_model", OLLAMA_DEFAULT_MODEL),
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.2, "stream": False}
             api = _read_pvt_param("localllm_api", OLLAMA_API).rstrip("/")
@@ -791,6 +1034,345 @@ def _retranslate_line(source_text, translate_type, tries=2):
     return None, best
 
 
+# --- Soat lai theo glossary ------------------------------------------------
+# Hunyuan-MT doc glossary trong prompt roi VAN bo qua o mot so cho, va sai theo
+# kieu doi han nghia. Do 10/9/2026 tren video that:
+#   你大爷 (chui) -> "Ong oi" (goi le phep)   <- dao nguoc sac thai
+#   幺零八 (so phong 108) -> mat han ca ve
+# Regex khong cuu duoc vi khong co quy luat trat tu; prompt cung khong (glossary
+# DA nam trong prompt, da thu 3 kieu). Nen: dich xong thi soat lai, cue nao
+# thieu tu bat buoc thi dich lai RIENG cue do voi tu duoc nhac thang vao prompt.
+#
+# CHI soat nhung tu ma dich chech la HONG NGHIA. Co tinh KHONG soat cac tu ma
+# dong nghia van chap nhan duoc (哎呀="Oi gioi" nhung "Oi troi" cung dung,
+# 大哥="ong oi" nhung "anh oi" cung dung) - ep nhung tu do chi lam ban dich cung
+# nhac di, va de gay dich lai vo ich.
+# Tran do dai cho ban dich lai, tinh theo THOI GIAN cue co - khong tinh theo do
+# dai ban cu, vi ban cu thuong ngan chinh VI no bo sot noi dung.
+# Do tren video that (64 cue): trung vi 14,1 ky tu/giay, muc 90% la 22,2. Lay 18
+# - noi hon trung vi de con cho nhet tu bat buoc vao, nhung khong toi muc doc
+# khong kip. el_clone da bao 23 cau phai nen nhanh nen khong duoc nong hon.
+KY_TU_MOI_GIAY = 18
+
+_NHAY_DOI = (('"', '"'), ('\u201c', '\u201d'), ("'", "'"), ('\u2018', '\u2019'), ('\u00ab', '\u00bb'))
+
+
+def _boc_nhay(t):
+    """Bo cap dau nhay bao TRON dong. Nhay giua cau thi giu nguyen."""
+    t = t.strip()
+    for mo, dong in _NHAY_DOI:
+        if len(t) > 1 and t.startswith(mo) and t.endswith(dong) and dong not in t[1:-1]:
+            return t[1:-1].strip()
+    return t
+
+
+# Model dung RIENG cho buoc soat glossary. Khong dung lai model dang dich vi
+# Hunyuan-MT KHONG lam duoc viec nay: do 10/9/2026, 3 ca that, 3 luot moi ca,
+# no tra ve Y HET NHAU moi luot (tat dinh, nen thu lai vo ich) va deu tranh tu
+# bat buoc - 你大爷 no dich thanh "Oi troi oi" chu nhat dinh khong chiu viet
+# "bo may". qwen2.5:14b cung 3 ca do: 6/6 dat.
+# Bang gia tri: model biet NGHE LENH thi lam duoc viec sua loi; model chuyen
+# dich thi dich hay hon nhung khong sai bao duoc. Dung moi con mot viec.
+GLOSSARY_MODEL_UU_TIEN = ("qwen2.5:14b", "qwen2.5:7b", "gemma3:12b")
+
+
+def _chon_model_soat(translate_type):
+    """Model de soat glossary. None = khong co gi hop -> bo qua buoc soat."""
+    if translate_type != TRANS_OLLAMA:
+        return None                     # Gemini: dung luon chinh no
+    co = set(ollama_models())
+    dang_dung = _read_pvt_param("localllm_model", "")
+    for m in GLOSSARY_MODEL_UU_TIEN:
+        if m in co and m != dang_dung:
+            return m
+    return None
+
+
+GLOSSARY_BAT_BUOC = (
+    "白天鹏", "白天蓬", "雪莲", "张若雪", "小白",   # ten rieng - phai dung y het
+    "你大爷",                                      # chui - dich chech la dao nghia
+    "幺零八",                                      # so phong - rot la mat thong tin
+    "一秒入睡",                                    # ten tro dua chay suot video
+)
+
+# Cac khoi lenh phai dat TRUOC "LINE:", de cau can dich la thu CUOI CUNG model
+# nhin thay. Da mac loi nay 10/9: ghep them huong dan vao SAU "LINE:" thi
+# Hunyuan bo qua sach - no dich thu nam cuoi prompt chu khong phai thu duoc gan
+# nhan. Cung mot bai hoc voi khoi vi du va khoi ngu canh.
+_RETRY_GLOSSARY_PROMPT = _RETRY_PROMPT.replace("LINE: {line}", """MANDATORY TERMS — the answer MUST contain these exact Vietnamese words:
+{terms}
+
+LENGTH LIMIT — this line is dubbed into a fixed {giay:.1f}s slot. Your answer
+must be at most {tran} characters. Cut every word that is not needed; keep the
+mandatory terms. A line that does not fit is worse than a plain one.
+
+LINE: {line}""")
+
+
+def _doc_glossary():
+    """glossary.txt -> {tu_trung: tu_viet}. Thieu file thi tra ve rong."""
+    f = PVT_DIR / "videotrans" / "glossary.txt"
+    if not f.exists():
+        return {}
+    ra = {}
+    for ln in f.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
+        if "=" in ln and not ln.strip().startswith("#"):
+            a, b = ln.split("=", 1)
+            if a.strip() and b.strip():
+                ra[a.strip()] = b.strip()
+    return ra
+
+
+def _tu_con_thieu(nguon, ban_dich, glos):
+    """Tu bat buoc co trong cau NGUON ma ban dich khong co. -> list tu Viet."""
+    thap = ban_dich.lower()
+    thieu = []
+    for k in GLOSSARY_BAT_BUOC:
+        v = glos.get(k)
+        if v and k in nguon and v.lower() not in thap:
+            # 你大爷 chua 大爷: neu ca hai cung khop thi chi giu cai DAI hon,
+            # vi tu dai la nghia dung (你大爷=bo may, khong phai 大爷=bac).
+            if any(k in k2 and k2 != k and k2 in nguon for k2 in GLOSSARY_BAT_BUOC):
+                continue
+            thieu.append(v)
+    return thieu
+
+
+def soat_glossary_srt(srt_path, source_srt, translate_type, tries=2):
+    """Dich lai cac cue thieu tu bat buoc. -> dict thong ke.
+
+    Chi chay voi engine goi lai duoc (Ollama/Gemini). Ban dich moi chi duoc
+    nhan khi no THAT SU co du tu con thieu va khong nuot noi dung.
+    """
+    st = {"soat": 0, "sua": 0, "model": ""}
+    if translate_type not in (TRANS_OLLAMA, TRANS_GEMINI):
+        return st
+    glos = _doc_glossary()
+    if not glos:
+        return st
+    cues = parse_srt(srt_path)
+    src = parse_srt(source_srt) if source_srt and Path(source_srt).exists() else []
+    if not cues or not src:
+        return st
+    smap = {a: t for a, _b, t in src}
+
+    # Quet TRUOC de biet co viec khong: khong co cue nao thieu thi khong dong
+    # toi model, khoi nap 9 GB vo ich.
+    can_soat = [(a, b, t) for a, b, t in cues
+                if smap.get(a) and _tu_con_thieu(smap[a], t, glos)]
+    if not can_soat:
+        return st
+    model = _chon_model_soat(translate_type)
+    st["model"] = model or "(engine dang dung)"
+    if model:
+        # Nha model dich TRUOC khi nap model soat: 4,6 GB + 9 GB cung luc la
+        # dung lai dung cai OOM da giet job hai lan hom 8/9.
+        ollama_unload(ly_do="để nhường chỗ cho model soát glossary")
+
+    ra = []
+    for start, end, text in cues:
+        nguon = smap.get(start, "")
+        thieu = _tu_con_thieu(nguon, text, glos) if nguon else []
+        if thieu:
+            st["soat"] += 1
+            giay = max(0.1, (end - start) / 1000)
+            # Khong bao gio chat hon ban dang co: neu ban cu von da dai hon tran
+            # thi it nhat cho ban moi bang no.
+            tran = int(max(40, giay * KY_TU_MOI_GIAY, len(text)))
+            prompt = _RETRY_GLOSSARY_PROMPT.format(
+                line=nguon, terms="\n".join(f'- "{t}"' for t in thieu),
+                giay=giay, tran=tran)
+            # Model phi tat dinh: cung mot prompt, luot nay bo quen tu bat buoc,
+            # luot sau lai co. Do 10/9: 1 luot chi dat 1/4 cue. Nen thu lai vai
+            # luot va lay ban DAU TIEN dat ca hai dieu kien (du tu + vua do dai).
+            cand = ""
+            for _ in range(max(1, tries)):
+                out = _llm_once(prompt, translate_type, model=model)
+                c = _cut_alternatives(_strip_wrappers(out.strip().splitlines()[0])) if out and out.strip() else ""
+                if not c:
+                    continue
+                c = _boc_nhay(c.translate(_CJK_PUNCT))
+                if (all(t.lower() in c.lower() for t in thieu) and len(c) <= tran
+                        and not CJK_RE.search(c) and _candidate_ok(c, nguon)):
+                    cand = c
+                    break
+                cand = cand or c          # giu ban dau lam ung vien bao loi
+            du = cand and all(t.lower() in cand.lower() for t in thieu)
+            vua_dai = cand and len(cand) <= tran
+            if du and vua_dai and not CJK_RE.search(cand) and _candidate_ok(cand, nguon):
+                text = cand
+                st["sua"] += 1
+            else:
+                vi_sao = ("qua dai" if cand and not vua_dai else
+                          "khong co du tu" if cand else "khong goi duoc model")
+                print(f"[glossary] cue {start}ms thieu {thieu} - dich lai {vi_sao}, giu ban cu",
+                      flush=True)
+        ra.append((start, end, text))
+
+    if model:
+        ollama_unload(model, ly_do="(soát glossary xong)")
+    if st["sua"]:
+        Path(srt_path).write_text(
+            "\n".join(f"{i}\n{_ms_to_srt_ts(a)} --> {_ms_to_srt_ts(b)}\n{c}\n"
+                       for i, (a, b, c) in enumerate(ra, 1)),
+            encoding="utf-8")
+    return st
+
+# --- Tang "Viet hoa": sua van phong cho ca file --------------------------
+# Model dich 7B (Hunyuan-MT va ca ban Chimera - do 10/9, ket qua y het nhau)
+# dich DUNG NGHIA nhung khong theo luat van phong: 17 lan "ban", 0 lan "may/tao",
+# xung ho doi giua cac cue lien nhau. Prompt khong sua duoc, doi model cung khong.
+#
+# Nhung qwen2.5:14b thi NGUOC LAI: bat no dich ca lo thi vo vun (lan chu Han,
+# dong rong, 22 phut/video) - do 10/9; con bat no sua TUNG CAU kem menh lenh ro
+# thi 6/6 dat o buoc soat glossary. Nen tang nay giao dung viec no lam duoc:
+# khong dich, chi VIET LAI cho dung giong, tung cau mot.
+#
+# Khac buoc soat glossary o cho: buoc kia chi dung vao cue thieu tu bat buoc
+# (~4/64), tang nay quet HET moi cue.
+VIET_HOA_MODEL_UU_TIEN = GLOSSARY_MODEL_UU_TIEN
+VIET_HOA_NGU_CANH = 2          # so cau da sua dua vao lam mau xung ho
+
+_VIET_HOA_PROMPT = """You rewrite Vietnamese subtitle lines so they sound like real
+spoken Vietnamese. You are NOT translating: the meaning is already correct.
+
+{luat}
+
+# WHAT TO DO
+Rewrite the line in CURRENT so that it obeys the rules above — above all the
+pronoun rules. Keep the meaning of SOURCE exactly: add nothing, drop nothing.
+
+# HARD RULES
+- Output ONLY the rewritten Vietnamese line. One line. Nothing else.
+- No quotes, no brackets, no tags, no explanation, no alternatives.
+- ZERO Chinese/Japanese/Korean characters.
+- At most {tran} characters — this line is dubbed into a {giay:.1f}s slot.
+- If CURRENT already obeys the rules, output it back unchanged.
+
+# WORDS YOU MUST KEEP EXACTLY (they come from the project glossary)
+{giu}
+
+# PRONOUNS ALREADY USED (reference only — never output these lines)
+{ngu_canh}
+
+SOURCE (Chinese): {nguon}
+CURRENT (Vietnamese): {hien_tai}"""
+
+
+def _viet_hoa_hop_le(cand, hien_tai, nguon, tran, phai_giu=()):
+    """Ban viet lai co dung duoc khong. Chan moi kieu hong da gap."""
+    if not cand or CJK_RE.search(cand):
+        return False
+    # Khong duoc pha thanh qua cua buoc soat glossary. Do 10/9: tang Viet hoa
+    # bien "bo may" (chui, dung glossary) nguoc lai thanh "bo oi" - lam mem
+    # dung cai vua sua duoc, va lam am tham.
+    if any(t.lower() not in cand.lower() for t in phai_giu):
+        return False
+    if len(cand) > tran:
+        return False
+    # Model doi khi tra ve loi giai thich thay vi cau dich.
+    if re.search(r'^(here|sure|i |the line|ban dich|bản dịch)', cand, re.I):
+        return False
+    # Nuot noi dung: cau dai ma bi rut qua nua thi gan nhu chac chan mat y.
+    if len(hien_tai) >= 40 and len(cand) < 0.6 * len(hien_tai):
+        return False
+    return _candidate_ok(cand, nguon)
+
+
+def viet_hoa_srt(srt_path, source_srt, translate_type, tries=2):
+    """Viet lai ca file cho dung van phong tieng Viet. -> dict thong ke."""
+    st = {"quet": 0, "sua": 0, "model": ""}
+    if translate_type not in (TRANS_OLLAMA, TRANS_GEMINI):
+        return st
+    cues = parse_srt(srt_path)
+    src = parse_srt(source_srt) if source_srt and Path(source_srt).exists() else []
+    if not cues or not src:
+        return st
+    smap = {a: t for a, _b, t in src}
+    glos = _doc_glossary()
+    model = _chon_model_soat(translate_type)
+    st["model"] = model or "(engine dang dung)"
+    if model:
+        ollama_unload(ly_do="để nhường chỗ cho model Việt hoá")
+
+    ra = []
+    da_sua = []
+    for start, end, text in cues:
+        nguon = smap.get(start, "")
+        if not nguon or not text.strip():
+            ra.append((start, end, text))
+            continue
+        st["quet"] += 1
+        giay = max(0.1, (end - start) / 1000)
+        tran = int(max(40, giay * KY_TU_MOI_GIAY, len(text)))
+        # Tu bat buoc DA co trong ban hien tai thi phai giu nguyen.
+        phai_giu = tuple(v for k, v in glos.items()
+                         if k in GLOSSARY_BAT_BUOC and v.lower() in text.lower())
+        prompt = _VIET_HOA_PROMPT.format(
+            luat=VI_PROMPT_RULES.strip(), tran=tran, giay=giay,
+            ngu_canh="\n".join(da_sua[-VIET_HOA_NGU_CANH:]) or "(chua co cau nao)",
+            giu=("\n".join(f'- "{t}"' for t in phai_giu) if phai_giu
+                 else "(khong co tu nao bat buoc)"),
+            nguon=nguon, hien_tai=text)
+        moi = ""
+        for _ in range(max(1, tries)):
+            out = _llm_once(prompt, translate_type, model=model)
+            if not out or not out.strip():
+                continue
+            c = _boc_nhay(_cut_alternatives(
+                _strip_wrappers(out.strip().splitlines()[0])).translate(_CJK_PUNCT))
+            if _viet_hoa_hop_le(c, text, nguon, tran, phai_giu):
+                moi = c
+                break
+        if moi and moi != text:
+            text = moi
+            st["sua"] += 1
+        da_sua.append(text)
+        ra.append((start, end, text))
+
+    if model:
+        ollama_unload(model, ly_do="(Việt hoá xong)")
+    if st["sua"]:
+        Path(srt_path).write_text(
+            "\n".join(f"{i}\n{_ms_to_srt_ts(a)} --> {_ms_to_srt_ts(b)}\n{c}\n"
+                       for i, (a, b, c) in enumerate(ra, 1)),
+            encoding="utf-8")
+    return st
+
+# --- Sua ngu phap tieng Viet bang luat -------------------------------------
+# Model dich chuyen dung (Hunyuan-MT) dich DUNG NGHIA nhung sai mot so quy tac
+# TRAT TU cua tieng Viet, va sai y het nhau moi lan. Prompt da ghi ro luat
+# (vi du "65.3度 -> 65 phay 3 do") ma no van khong theo - do la gioi han cua
+# model 7B chuyen dich, khong phai loi prompt. Nhung loi nay CO QUY LUAT nen
+# sua bang luat thi chac chan dung hon la nan ni model.
+# Mazino chi ra 10/9/2026: "May lai dang choi tro gi vay nua?" phai la "...gi
+# nua vay?", va "sau muoi lam do ba phay" phai la "sau muoi lam phay ba do".
+
+_SO_CHU = r'(?:không|một|hai|ba|bốn|năm|sáu|bảy|tám|chín|mười|mươi|lăm|linh|lẻ|trăm|nghìn|ngàn|triệu|tư)'
+
+# 1. So thap phan bi dao: "<so> độ <so> phẩy" -> "<so> phẩy <so> độ".
+#    Bat ca chu so lan so viet bang chu.
+_RE_THAP_PHAN = re.compile(
+    rf'\b((?:\d+|{_SO_CHU}(?:\s+{_SO_CHU})*))\s+độ\s+((?:\d+|{_SO_CHU}(?:\s+{_SO_CHU})*))\s+phẩy\b',
+    re.I)
+
+# 2. Tieu tu cuoi cau bi dao: "... vậy nữa?" -> "... nữa vậy?"
+#    Trong tieng Viet "nua" luon dung TRUOC tieu tu tinh thai cuoi cau.
+_RE_TIEU_TU = re.compile(r'\b(vậy|thế|đấy|rồi)\s+(nữa)\b(?=\s*[?!.…,]|\s*$)', re.I)
+
+# 3. Thieu dau cach sau dau phay (khong dung cho so kieu "1,5").
+_RE_PHAY_DINH = re.compile(r',(?=[^\s\d])')
+
+
+def _sua_ngu_phap_vi(t):
+    """Sua cac loi TRAT TU co quy luat. -> (text_moi, so_cho_da_sua)"""
+    goc = t
+    t = _RE_THAP_PHAN.sub(lambda m: f'{m.group(1)} phẩy {m.group(2)} độ', t)
+    t = _RE_TIEU_TU.sub(lambda m: f'{m.group(2)} {m.group(1)}', t)
+    t = _RE_PHAY_DINH.sub(', ', t)
+    return t, (0 if t == goc else 1)
+
+
 def sanitize_translated_srt(srt_path, source_srt=None, translate_type=TRANS_GOOGLE,
                             tries=2):
     """Làm sạch .srt dịch TẠI CHỖ. -> dict thống kê để log.
@@ -802,7 +1384,8 @@ def sanitize_translated_srt(srt_path, source_srt=None, translate_type=TRANS_GOOG
     """
     cues = parse_srt(srt_path)
     if not cues:
-        return {"cues": 0, "unwrapped": 0, "cut_alt": 0, "cjk": 0, "fixed": 0, "stripped": 0}
+        return {"cues": 0, "unwrapped": 0, "cut_alt": 0, "cjk": 0, "fixed": 0,
+                "stripped": 0, "grammar": 0}
 
     # Ghep voi cau GOC theo MOC THOI GIAN, khong theo chi so: pyvideotrans co the
     # lam mat han mot cue khi dich (do that: nguon 58 cue -> ban dich 57), tu do
@@ -811,7 +1394,8 @@ def sanitize_translated_srt(srt_path, source_srt=None, translate_type=TRANS_GOOG
     src = parse_srt(source_srt) if source_srt and Path(source_srt).exists() else []
     smap = {a: t for a, _b, t in src}
 
-    st = {"cues": len(cues), "unwrapped": 0, "cut_alt": 0, "cjk": 0, "fixed": 0, "stripped": 0}
+    st = {"cues": len(cues), "unwrapped": 0, "cut_alt": 0, "cjk": 0, "fixed": 0,
+          "stripped": 0, "grammar": 0}
     out = []
     for i, (start, end, text) in enumerate(cues):
         t = _strip_wrappers(text)
@@ -844,6 +1428,8 @@ def sanitize_translated_srt(srt_path, source_srt=None, translate_type=TRANS_GOOG
                 st["stripped"] += 1
                 if not t:
                     t = "…"
+        t, n_gp = _sua_ngu_phap_vi(t)
+        st["grammar"] += n_gp
         out.append((start, end, t))
 
     Path(srt_path).write_text(
@@ -968,6 +1554,17 @@ def transcribe_translate_dub(input_video, work_dir, source_lang, target_lang,
 
     st = sanitize_translated_srt(dub_srt, source_srt=pvt_out / f"{source_lang}.srt",
                                  translate_type=str(translate_type))
+    # Soat glossary PHAI chay truoc ollama_unload: no con phai goi lai model.
+    sg = soat_glossary_srt(dub_srt, pvt_out / f"{source_lang}.srt", str(translate_type))
+    if sg["soat"]:
+        print(f"[glossary] {sg['soat']} cue thiếu từ bắt buộc -> sửa được {sg['sua']} "
+              f"(model soát: {sg['model']})", flush=True)
+    # Tang Viet hoa: chay SAU soat glossary, va co rao chan giu lai tu glossary
+    # (do 10/9: khong co rao thi no bien "bo may" nguoc thanh "bo oi").
+    vh = viet_hoa_srt(dub_srt, pvt_out / f"{source_lang}.srt", str(translate_type))
+    if vh["quet"]:
+        print(f"[Việt hoá] {vh['quet']} cue -> viết lại {vh['sua']} "
+              f"(model: {vh['model']})", flush=True)
     if str(translate_type) == TRANS_OLLAMA:
         # Trả RAM TRƯỚC bước dub + ghép video, nếu không máy 24 GB sẽ bị OOM.
         ollama_unload()
