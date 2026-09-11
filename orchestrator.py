@@ -920,14 +920,21 @@ def _co_chu_dinh(text):
     saoRepair it? ..." - mot manh tieng Anh dinh vao giua cau tieng Viet. Loai
     loi nay di thang vao video vi khong buoc nao sau do bat duoc.
 
+    Bat HAI dang dinh:
+      1. chu thuong lien chu hoa  -> "lam saoRepair it?"
+      2. dau cau lien chu hoa     -> "Vang, nhu vay.That"
+    Dang 2 tim ra sau, luc do preset the loai: luat chi bat dang 1 de lot.
+
     Tieng Viet khong bao gio co chu thuong dinh lien chu hoa trong cung mot tu,
-    nen luat nay rat sac. Do tren 313 dong phu de that (4 file, ca ban truoc va
-    sau khi soat): bao dung 1 dong, va do chinh la dong hong. Khong bao nham
-    lan nao. Ngoai le co the gap la ten thuong hieu kieu "iPhone"; bi chan thi
-    chi giu nguyen cau cu, khong mat gi.
+    va sau dau cau thi luon co dau cach, nen luat nay rat sac. Do tren 543 dong
+    phu de that (9 file, ca ban truoc va sau khi soat): bao dung 2 dong, ca hai
+    deu la dong hong. Khong bao nham lan nao. Ngoai le co the gap la ten thuong
+    hieu kieu "iPhone"; bi chan thi chi giu nguyen cau cu, khong mat gi.
     """
-    return any(text[i].islower() and text[i + 1].isupper()
-               for i in range(len(text) - 1))
+    if any(text[i].islower() and text[i + 1].isupper()
+           for i in range(len(text) - 1)):
+        return True
+    return bool(re.search(r'[.,;:!?]["\')\]]?[A-ZĐÀ-Ỹ]', text))
 
 
 def _candidate_ok(cand, ask):
@@ -1014,6 +1021,89 @@ def _llm_once(prompt, translate_type, timeout=120, model=None):
     except Exception as e:
         print(f"[sạch] gọi lại engine dịch hỏng: {e}", flush=True)
     return None
+
+
+# --- Preset the loai noi dung ---------------------------------------------
+# PeiPei Dub co dropdown "The loai video" (Tu tien/Tien hiep, Kiem hiep, Do thi,
+# Ngon tinh...) va ban dich trong quang cao cua ho giu dung tong chu, thieu tong
+# chu, phu than, lao tu, xung ho nhat quan ca doan. Do la thu vá dung loi
+# Mazino phan nan: "con nhieu doan rat suong, loi danh xung".
+#
+# CHI nap vao HAI luot soat (soat_glossary_srt + viet_hoa_srt). Ca hai chay bang
+# qwen2.5, la model BIET NGHE LENH, nen dat van xuoi tieng Anh trong prompt la
+# an toan.
+#
+# TUYET DOI KHONG nap vao _RETRY_PROMPT. Prompt do di thang toi Hunyuan o buoc
+# don ban dich (_llm_once model=None -> localllm_model), ma Hunyuan DICH LUON
+# moi cau tieng Anh no thay trong prompt. Da dinh 3 lan trong mot toi vi bai
+# hoc nay - xem ghi chu trong videotrans/translator/_localllm.py.
+THE_LOAI = {
+    "": "",
+
+    "tu-tien": """Genre: Chinese cultivation drama (tu tiên / tiên hiệp).
+- Pronouns are archaic, NEVER modern. Use ta/ngươi between equals or from a
+  superior; tại hạ/các hạ when being polite; lão phu for an old man speaking of
+  himself; đệ tử when addressing a master. NEVER "bạn", "anh/em", "cậu/tớ".
+- Keep Hán-Việt terms: tông chủ, thiếu tông chủ, trưởng lão, tông môn, đại tỷ,
+  phụ thân, mẫu thân, đệ tử, sư phụ, sư huynh, sư đệ, tu vi, linh khí, pháp bảo,
+  phế vật, lão tử.
+- Never use modern slang (ok, chuẩn, xịn, oke). The register is formal and old.""",
+
+    "kiem-hiep": """Genre: wuxia (kiếm hiệp / võ hiệp).
+- Pronouns: tại hạ, các hạ, ta/ngươi, lão phu. NEVER "bạn" or "anh/em".
+- Keep Hán-Việt terms: đại hiệp, bang chủ, chưởng môn, võ lâm, giang hồ, nội
+  công, khinh công, chiêu thức, sư phụ, đệ tử.
+- Register is formal and old, no modern slang.""",
+
+    "do-thi": """Genre: modern city drama (đô thị / hiện đại).
+- Pronouns are everyday modern Vietnamese: anh, em, tôi, cậu, ông, bà, chú, cô.
+  Pick by age and closeness, then keep the SAME pair for the same two people.
+- Personal names still use Hán-Việt readings, never pinyin.
+- Plain modern Vietnamese. No archaic words (ta/ngươi, tại hạ).""",
+
+    "ngon-tinh": """Genre: romance (ngôn tình / lãng mạn).
+- Between the couple use anh/em and keep it stable; never switch to tôi/bạn
+  mid-scene.
+- Warm, soft register. Avoid crude words unless the source is crude.
+- Personal names use Hán-Việt readings, never pinyin.""",
+
+    "hai-doi-thuong": """Genre: comedy / everyday life (hài, đời thường, vlog).
+- NEVER "bạn". It is the one word that makes the dub sound like a machine.
+- Choose the pronoun from WHO is speaking to WHOM, do not apply one pair to
+  everything:
+    close friends teasing each other  -> mày/tao
+    friendly but not that close       -> ông/bà, ông ơi, bà ơi
+    a stranger, a shop or hotel staff -> anh/chị, anh ơi, chị ơi
+    speaking to the camera            -> mình and cả nhà
+  Once a pair is chosen for two people, keep it for the rest of the video.
+- If the line has NO pronoun in it, do not add one. "Cảm ơn" stays "Cảm ơn",
+  never becomes "cảm ơn mày".
+- Keep interjections alive: Ối giời, Má ơi, Ối, trời đất ơi.
+- Short punchy lines. This is spoken comedy, not narration.""",
+
+    "am-thuc": """Genre: food and cooking (ẩm thực / nấu ăn).
+- Speaker talks to the viewer: dùng "mình" cho người nói, "các bạn" hoặc "cả
+  nhà" cho người xem. Keep it warm and casual.
+- Keep cooking words concrete: xào, hầm, chiên, nêm, ướp, đảo đều, lửa lớn.
+- Personal names use Hán-Việt readings, never pinyin.""",
+}
+
+
+def _khoi_the_loai(khoa):
+    """Khoi van ban the loai de chen vao prompt. Rong = khong chi dinh."""
+    noi_dung = THE_LOAI.get((khoa or "").strip(), "")
+    if not noi_dung:
+        return "(khong chi dinh the loai)"
+    return noi_dung
+
+
+def _the_loai_dang_chon():
+    """Doc the_loai tu config.json. Khoa la -> coi nhu khong chi dinh."""
+    try:
+        k = (load_config().get("the_loai") or "").strip()
+    except Exception:
+        return ""
+    return k if k in THE_LOAI else ""
 
 
 _RETRY_PROMPT = """Translate this ONE Chinese video-subtitle line into casual spoken Vietnamese.
@@ -1268,6 +1358,9 @@ spoken Vietnamese. You are NOT translating: the meaning is already correct.
 
 {luat}
 
+# GENRE — match this register and terminology
+{the_loai}
+
 # WHAT TO DO
 Rewrite the line in CURRENT so that it obeys the rules above — above all the
 pronoun rules. Keep the meaning of SOURCE exactly: add nothing, drop nothing.
@@ -1309,7 +1402,7 @@ def _viet_hoa_hop_le(cand, hien_tai, nguon, tran, phai_giu=()):
     return _candidate_ok(cand, nguon)
 
 
-def viet_hoa_srt(srt_path, source_srt, translate_type, tries=2):
+def viet_hoa_srt(srt_path, source_srt, translate_type, tries=2, the_loai=None):
     """Viet lai ca file cho dung van phong tieng Viet. -> dict thong ke."""
     st = {"quet": 0, "sua": 0, "model": ""}
     if translate_type not in (TRANS_OLLAMA, TRANS_GEMINI):
@@ -1320,6 +1413,7 @@ def viet_hoa_srt(srt_path, source_srt, translate_type, tries=2):
         return st
     smap = {a: t for a, _b, t in src}
     glos = _doc_glossary()
+    khoi_tl = _khoi_the_loai(_the_loai_dang_chon() if the_loai is None else the_loai)
     model = _chon_model_soat(translate_type)
     st["model"] = model or "(engine dang dung)"
     if model:
@@ -1339,7 +1433,7 @@ def viet_hoa_srt(srt_path, source_srt, translate_type, tries=2):
         phai_giu = tuple(v for k, v in glos.items()
                          if k in GLOSSARY_BAT_BUOC and v.lower() in text.lower())
         prompt = _VIET_HOA_PROMPT.format(
-            luat=VI_PROMPT_RULES.strip(), tran=tran, giay=giay,
+            luat=VI_PROMPT_RULES.strip(), tran=tran, giay=giay, the_loai=khoi_tl,
             ngu_canh="\n".join(da_sua[-VIET_HOA_NGU_CANH:]) or "(chua co cau nao)",
             giu=("\n".join(f'- "{t}"' for t in phai_giu) if phai_giu
                  else "(khong co tu nao bat buoc)"),

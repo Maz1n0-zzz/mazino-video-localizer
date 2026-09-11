@@ -23,6 +23,10 @@ DEFAULTS = {
     # xưng hô "Bạn" cho nhóm bạn trẻ). Gemini 0 lỗi bỏ dịch và hiểu được ý mỉa
     # mai; Qwen14b kém hơn 1 bậc nhưng không giới hạn quota -> để dự phòng.
     "trans_engine": "gemini",
+    # Thể loại nội dung. Nạp bộ xưng hô + thuật ngữ riêng vào HAI lượt soát chạy
+    # bằng qwen. Rỗng = không chỉ định, giữ nguyên hành vi cũ. Danh sách khoá hợp
+    # lệ xem orchestrator.THE_LOAI.
+    "the_loai": "",
 }
 
 
