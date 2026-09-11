@@ -98,10 +98,18 @@ class Gemini(BaseTrans):
                 logger.warning(f'[gemini]请求失败')
                 raise TranslateSrtError(f"[Gemini]result is empty")
                 
+            cleaned = re.sub(r'<think>(.*?)</think>', '', result, flags=re.I | re.S)
             match = re.search(r'<TRANSLATE_TEXT>(.*?)(?:</TRANSLATE_TEXT>|$)',
-                              re.sub(r'<think>(.*?)</think>', '', result, flags=re.I | re.S), re.S | re.I)
+                              cleaned, re.S | re.I)
             if match:
                 return match.group(1)
+            # Gemini doi khi tra ban dich DUNG nhung quen echo lai the boc
+            # <TRANSLATE_TEXT>. Do thuc te 8/9/2026 tren video 83 cue: luot 0 co
+            # the, luot 1 khong -> job chet du ban dich nguyen ven, mat trang ~47
+            # phut LaMa da chay xong. Lay luon text tho thay vi nem di.
+            if cleaned.strip():
+                logger.warning('[gemini] thieu the <TRANSLATE_TEXT>, dung result tho')
+                return cleaned
             raise TranslateSrtError(f"Gemini result is emtpy")
         except httpx.ConnectTimeout as e:
             raise StopTask(f' {tr("Unable to connect to remote API","Gemini AI")}\n{e}') from e
