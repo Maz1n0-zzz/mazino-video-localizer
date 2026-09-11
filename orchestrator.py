@@ -877,9 +877,26 @@ SEG_MAX_SPEECH_S = 5
 SEG_VAD_THRESHOLD = 0.35
 
 
+# VAD tach tieng noi. silero bo sot rat nang khi nhac nen to: do tren video that
+# no bo qua 118,7s tren tong 296s (40%). Phan bo sot roi vao luoi vot
+# _recover_missed_speech(), von cat mu thanh khoi 8 giay -> cue 3 chu keo dai
+# 8,0s, TTS doc 1s roi im 7s trong khi nguoi goc van dang noi. Do chinh la loi
+# "voice lech so voi tieng goc". Doi sang TEN VAD tren cung video: 0 khoang
+# trong >=3s, luoi vot khong phai chay lan nao, bat them 105 ky tu tieng Trung.
+# Goi `ten_vad` phai co trong .venv cua pyvideotrans; thieu thi no tu quay ve
+# silero, luc do loi cu quay lai ma khong bao gi.
+SEG_VAD_TYPE = "tenvad"
+
+# Khoang lang toi thieu truoc khi cat sang cue moi. 140ms la gia tri da dung
+# suot cac lan do TEN VAD o tren, ghi lai day de may cai moi chay dung cau hinh
+# da nghiem thu. Chua do rieng anh huong cua tung muc.
+SEG_MIN_SILENCE_MS = 140
+
+
 def tune_segmentation(min_speech_ms=SEG_MIN_SPEECH_MS, max_speech_s=SEG_MAX_SPEECH_S,
-                      threshold=SEG_VAD_THRESHOLD):
-    """Ghi ngưỡng cắt đoạn vào cfg.json của pyvideotrans trước mỗi lần chạy.
+                      threshold=SEG_VAD_THRESHOLD, vad_type=SEG_VAD_TYPE,
+                      min_silence_ms=SEG_MIN_SILENCE_MS):
+    """Ghi ngưỡng cắt đoạn + loại VAD vào cfg.json của pyvideotrans mỗi lần chạy.
 
     Ghi lúc chạy chứ không sửa sẵn file vendor: bản đóng gói Windows KHÔNG bundle
     cfg.json (AppSettings tự tạo lại với default khi thiếu — xem ghi chú DATAS
@@ -893,15 +910,20 @@ def tune_segmentation(min_speech_ms=SEG_MIN_SPEECH_MS, max_speech_s=SEG_MAX_SPEE
         d = {}
     before = d.get("min_speech_duration_ms")
     before_th = d.get("threshold")
+    before_vad = d.get("vad_type")
     d["min_speech_duration_ms"] = int(min_speech_ms)
     d["max_speech_duration_s"] = int(max_speech_s)
     d["threshold"] = float(threshold)
+    d["vad_type"] = str(vad_type)
+    d["min_silence_duration_ms"] = int(min_silence_ms)
     try:
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(_json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
     except Exception as e:
         print(f"[cảnh báo] không ghi được cfg.json ({e}) — vẫn chạy với ngưỡng cũ", flush=True)
         return False
+    if before_vad != str(vad_type):
+        print(f"[doan] VAD {before_vad} -> {vad_type}", flush=True)
     if before != int(min_speech_ms) or before_th != float(threshold):
         print(f"[đoạn] min_speech {before} -> {min_speech_ms}ms, max_speech {max_speech_s}s, "
               f"ngưỡng VAD {before_th} -> {threshold}", flush=True)
