@@ -149,6 +149,14 @@
             <b>aistudio.google.com/apikey</b> rồi dán vào đây (chỉ cần nhập 1 lần).</p>
           <input type="password" id="gemini-api-key" class="opt-pill" placeholder="Gemini API key">
         </div>
+        <div id="paid-panel" style="display:none">
+          <p class="region-hint"><b>Kênh trả phí</b> — tính tiền theo lượng dùng trên tài khoản của bạn.
+            Chỉ chạy khi bạn chủ động chọn; các engine miễn phí không bao giờ tự chuyển sang đây.
+            Key lưu 1 lần, để trống ô model là dùng mặc định.</p>
+          <p class="region-hint" id="paid-key-note"></p>
+          <input type="password" id="paid-api-key" class="opt-pill" placeholder="API key">
+          <input type="text" id="paid-model" class="opt-pill" placeholder="Tên model (để trống = mặc định)">
+        </div>
         <div id="ollama-panel" style="display:none">
           <p class="region-hint">Ollama chạy hoàn toàn trên máy, miễn phí và không cần mạng.
             Nếu danh sách trống: mở Terminal gõ <b>ollama serve</b>, rồi <b>ollama pull qwen2.5:7b</b>.</p>

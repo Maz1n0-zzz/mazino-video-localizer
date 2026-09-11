@@ -123,11 +123,25 @@ def _whisper_model_dir(name):
 TRANS_GOOGLE = "google"
 TRANS_GEMINI = "gemini"
 TRANS_OLLAMA = "ollama"
+TRANS_OPENAI = "openai"
+TRANS_DEEPSEEK = "deepseek"
+TRANS_OPENROUTER = "openrouter"
+
+# 3 kênh TRẢ PHÍ — dự phòng khi chưa có model offline đủ tốt. Map tên hiển thị
+# ở web sang translate_type của pyvideotrans và sang khoá cấu hình bên orch.
+PAID_UI = {
+    TRANS_OPENAI: orch.TRANS_CHATGPT,
+    TRANS_DEEPSEEK: orch.TRANS_DEEPSEEK,
+    TRANS_OPENROUTER: orch.TRANS_OPENROUTER,
+}
 
 TRANS_TYPE = {
     TRANS_GOOGLE: orch.TRANS_GOOGLE,
     TRANS_GEMINI: orch.TRANS_GEMINI,
     TRANS_OLLAMA: orch.TRANS_OLLAMA,
+    TRANS_OPENAI: orch.TRANS_CHATGPT,
+    TRANS_DEEPSEEK: orch.TRANS_DEEPSEEK,
+    TRANS_OPENROUTER: orch.TRANS_OPENROUTER,
 }
 
 
@@ -140,6 +154,12 @@ def trans_choices():
         out.append((TRANS_OLLAMA, f"Ollama — miễn phí hẳn, chạy offline ({len(models)} model sẵn sàng)"))
     else:
         out.append((TRANS_OLLAMA, "Ollama — miễn phí hẳn, chạy offline (CHƯA khởi động Ollama)"))
+    for ten_ui, mo_ta in ((TRANS_OPENAI, "OpenAI — TRẢ PHÍ theo lượng dùng"),
+                          (TRANS_DEEPSEEK, "DeepSeek — TRẢ PHÍ, rẻ nhất, mạnh tiếng Trung"),
+                          (TRANS_OPENROUTER, "OpenRouter — TRẢ PHÍ, vào được hầu hết model")):
+        e = PAID_UI[ten_ui]
+        k = "đã lưu key" if orch.get_paid_key(e) else "cần API key"
+        out.append((ten_ui, f"{mo_ta} ({k}, model {orch.get_paid_model(e)})"))
     return out
 
 
@@ -287,6 +307,12 @@ def _translation_plan(trans_engine):
         return plan
     if trans_engine == TRANS_OLLAMA:
         return [(TRANS_OLLAMA, None), (TRANS_GOOGLE, None)]
+    # Kênh TRẢ PHÍ: thử chính nó, hỏng thì về Google (miễn phí).
+    # CỐ Ý không cho bậc nào tụt VÀO kênh trả phí, và cũng không nối 2 kênh trả
+    # phí với nhau: tụt hạng là hành vi TỰ ĐỘNG, mà tiêu tiền của người dùng thì
+    # phải do người dùng chủ động chọn, không được xảy ra sau lưng.
+    if trans_engine in PAID_UI:
+        return [(trans_engine, None), (TRANS_GOOGLE, None)]
     return [(TRANS_GOOGLE, None)]
 
 
@@ -297,13 +323,23 @@ def _translate_with_fallback(job_id, input_video, work_dir, source_lang, target_
     for i, (engine, model) in enumerate(plan):
         if engine == TRANS_GEMINI:
             orch.set_gemini_config(orch.get_gemini_key(), model)
+        elif engine in PAID_UI:
+            orch.set_paid_config(PAID_UI[engine])
         elif engine == TRANS_OLLAMA:
             have = orch.ollama_models()
             if not have:
                 continue
-            orch.set_ollama_config(have[0])
+            # Ton trong model nguoi dung da chon (buoc validate da ghi no vao
+            # params.json). Truoc day lay thang have[0]: Mazino chon qwen2.5:14b
+            # ma van chay Hunyuan vi Hunyuan dung dau danh sach -> moi phep so
+            # sanh model deu vo nghia, va anh ay khong he duoc bao.
+            # `model` chi khac None khi ke hoach chi dinh san (chuoi Gemini).
+            chon = model or orch.get_ollama_model()
+            orch.set_ollama_config(chon if chon in have else have[0])
         if i > 0:
-            _log(job_id, f"    ⚠ Hết hạn mức — chuyển sang: {engine}"
+            reason = ("Hết hạn mức" if last is not None and orch.is_quota_error(last.detail)
+                      else "Bậc dịch trước lỗi")
+            _log(job_id, f"    ⚠ {reason} — chuyển sang: {engine}"
                          + (f" ({model})" if model else ""))
         try:
             return orch.transcribe_translate_dub(
@@ -316,9 +352,12 @@ def _translate_with_fallback(job_id, input_video, work_dir, source_lang, target_
             )
         except orch.PipelineStageError as e:
             last = e
-            # Chỉ tụt hạng khi ĐÚNG là hết hạn mức. Lỗi khác (mã ngôn ngữ sai,
-            # model hỏng...) phải nổi lên ngay, đổi engine cũng không cứu được.
-            if not orch.is_quota_error(e.detail):
+            # MẶC ĐỊNH LÀ TỤT HẠNG. Chỉ nổi lên ngay khi lỗi nằm rõ ràng ngoài
+            # tầng dịch (ffmpeg/ASR/mã ngôn ngữ) — đổi engine không cứu được.
+            # Đổi hướng so với bản đầu (danh sách trắng theo mẫu lỗi) vì bản đó
+            # để lọt cả "result is emtpy" lẫn "503 high demand" -> giết job.
+            # Tụt hạng sai chỉ tốn ~90 giây ASR mỗi bậc; chặn sai thì mất cả job.
+            if orch.is_engine_independent_error(e.detail):
                 raise
     raise last
 
@@ -474,6 +513,11 @@ def get_config():
         "trans_choices": trans_choices(),
         "trans_default": cfg.get("trans_engine", TRANS_GOOGLE),
         "gemini_key_saved": bool(orch.get_gemini_key()),
+        # Key đã nhập được giữ lại trên MÁY NÀY (params.json), kể cả bản Windows
+        # đóng gói: installer cài vào {localappdata} nên thư mục ghi được.
+        # Gửi kèm trạng thái để UI khỏi bắt nhập lại key đã có.
+        "paid_keys_saved": {k: bool(orch.get_paid_key(e)) for k, e in PAID_UI.items()},
+        "paid_models": {k: orch.get_paid_model(e) for k, e in PAID_UI.items()},
         "ollama_models": orch.ollama_models(),
         "inpaint_choices": INPAINT_CHOICES,
         "voices": voices_for_lang(cfg["target_lang"]),
@@ -578,6 +622,10 @@ async def run_pipeline(
     trans_engine: str = Form("google"),
     gemini_api_key: str = Form(""),
     ollama_model: str = Form(""),
+    # Dùng CHUNG cho cả 3 kênh trả phí: mỗi lần chạy chỉ chọn được 1 engine nên
+    # 1 cặp ô là đủ, khỏi bày 6 ô ra màn hình.
+    paid_api_key: str = Form(""),
+    paid_model: str = Form(""),
 ):
     job_id = uuid.uuid4().hex[:12]
     suffix = Path(video.filename or "input.mp4").suffix or ".mp4"
@@ -647,6 +695,18 @@ async def run_pipeline(
                 status_code=400,
             )
         orch.set_ollama_config(ollama_model.strip() or have[0])
+    elif trans in PAID_UI:
+        e = PAID_UI[trans]
+        ten = orch.PAID_TRANS[e]["ten"]
+        key = paid_api_key.strip()
+        if not key and not orch.get_paid_key(e):
+            return JSONResponse(
+                {"error": f"Chọn {ten} để dịch thì cần API key của {ten}. "
+                          f"Dán key vào ô dưới mục engine dịch. "
+                          f"LƯU Ý: kênh này TÍNH TIỀN theo lượng dùng."},
+                status_code=400,
+            )
+        orch.set_paid_config(e, key or None, paid_model.strip() or None)
 
     orch.reset_cancel()   # job trước có thể đã bật cờ huỷ
     JOBS[job_id] = {"logs": [], "status": "running", "result": None}

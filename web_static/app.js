@@ -55,6 +55,10 @@ const els = {
   transEngine: document.getElementById("trans_engine"),
   geminiPanel: document.getElementById("gemini-panel"),
   geminiApiKey: document.getElementById("gemini-api-key"),
+  paidPanel: document.getElementById("paid-panel"),
+  paidApiKey: document.getElementById("paid-api-key"),
+  paidModel: document.getElementById("paid-model"),
+  paidKeyNote: document.getElementById("paid-key-note"),
   ollamaPanel: document.getElementById("ollama-panel"),
   ollamaModel: document.getElementById("ollama-model"),
   inpaintMode: document.getElementById("inpaint_mode"),
@@ -225,11 +229,31 @@ els.modelName.addEventListener("change", updateAsrPanel);
 
 // Engine dịch: Gemini cần key (1 lần), Ollama cần server chạy sẵn trên máy.
 let geminiKeySaved = false;
+// Key da nhap tren MAY NAY duoc giu lai -> khong bat nhap lai.
+let paidKeysSaved = {};
+let paidModels = {};
+
+// 3 kenh tra phi dung chung 1 cap o key/model: moi lan chi chon duoc 1 engine.
+const PAID_ENGINES = ["openai", "deepseek", "openrouter"];
 
 function updateTransPanel() {
   const v = els.transEngine.value;
   els.geminiPanel.style.display = v === "gemini" && !geminiKeySaved ? "block" : "none";
   els.ollamaPanel.style.display = v === "ollama" ? "block" : "none";
+  const laPaid = PAID_ENGINES.includes(v);
+  els.paidPanel.style.display = laPaid ? "block" : "none";
+  if (laPaid) {
+    const daLuu = !!paidKeysSaved[v];
+    els.paidApiKey.placeholder = daLuu
+      ? "\u2713 Da luu key tren may nay \u2014 de trong neu khong doi"
+      : "API key";
+    els.paidApiKey.value = "";
+    els.paidModel.value = paidModels[v] || "";
+    els.paidKeyNote.textContent = daLuu
+      ? "\u2713 Key da luu tren may nay, khong can nhap lai."
+      : "Chua co key cho kenh nay \u2014 dan key vao o duoi.";
+    els.paidKeyNote.style.color = daLuu ? "#4ade80" : "";
+  }
 }
 els.transEngine.addEventListener("change", updateTransPanel);
 
@@ -286,6 +310,8 @@ async function loadConfig() {
       : "Clone giọng (F5-TTS) — chưa cài trên bản này";
   }
   geminiKeySaved = !!data.gemini_key_saved;
+  paidKeysSaved = data.paid_keys_saved || {};
+  paidModels = data.paid_models || {};
   fillSelect(els.transEngine, data.trans_choices, data.trans_default);
   const om = data.ollama_models || [];
   fillSelect(els.ollamaModel, om.length ? om : [["", "chưa có model — chạy: ollama pull qwen2.5:7b"]], om[0]);
@@ -508,6 +534,9 @@ els.runBtn.addEventListener("click", async () => {
     form.append("gemini_api_key", els.geminiApiKey.value.trim());
   } else if (els.transEngine.value === "ollama") {
     form.append("ollama_model", els.ollamaModel.value);
+  } else if (PAID_ENGINES.includes(els.transEngine.value)) {
+    form.append("paid_api_key", els.paidApiKey.value.trim());
+    form.append("paid_model", els.paidModel.value.trim());
   }
   form.append("voice_role", els.voiceRole.value);
   form.append("inpaint_mode", els.inpaintMode.value);
