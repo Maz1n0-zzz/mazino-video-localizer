@@ -1073,7 +1073,18 @@ def _boc_nhay(t):
 # "bo may". qwen2.5:14b cung 3 ca do: 6/6 dat.
 # Bang gia tri: model biet NGHE LENH thi lam duoc viec sua loi; model chuyen
 # dich thi dich hay hon nhung khong sai bao duoc. Dung moi con mot viec.
-GLOSSARY_MODEL_UU_TIEN = ("qwen2.5:14b", "qwen2.5:7b", "gemma3:12b")
+#
+# 7b DUNG TRUOC 14b. Do 11/9/2026 tren job 35889c8e3580 (83 cue, 7 cue thieu tu
+# bat buoc), cung mot file, cung hai luot soat:
+#   - diem glossary BANG NHAU: ca hai vá 6/7, truot o hai cue khac nhau.
+#   - 7b: 71 giay. 14b: 176 giay.
+#   - 14b can 9,0 GB nhung may chi con ~9,7 GB trong -> chay xong con 3,1 GB.
+#     Da lam may sap hai lan truoc do. Mot luot soat bi sap thi chat luong bang
+#     KHONG, khong phai cao hon.
+# 14b viet tieng Viet tu nhien hon that (no viet lai ca cau, 7b hay chi doi dai
+# tu roi de nguyen), nhung khoang cach do va duoc bang prompt, con RAM thi
+# khong. Giu 14b trong danh sach de ai co may khoe van dung duoc.
+GLOSSARY_MODEL_UU_TIEN = ("qwen2.5:7b", "qwen2.5:14b", "gemma3:12b")
 
 
 def _chon_model_soat(translate_type):
