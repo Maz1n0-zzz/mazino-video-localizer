@@ -83,6 +83,73 @@ class BaseTrans(BaseCon):
                 self._unload()
 
 
+    # -- Ep 1:1 dong ------------------------------------------------------
+    # Model dich HAY GOP 2 dong nguon thanh 1. Code goc bu dong rong vao CUOI lo
+    # -> moi dong sau cho gop bi TRUOT LEN MOT BAC, tuc gan sai moc thoi gian.
+    # Do thuc te 9/9/2026 tren video 83 cue: 1 lan gop lam 8 cue lien tiep lech
+    # nguyen mot cau suot ~30 giay (03:31->04:00), va 1 cue thoai bi mat han.
+    #
+    # Chien luoc: sai so dong -> thu lai (model khong tien dinh, temperature>0);
+    # van sai -> CHIA DOI lo va de quy. Lo 1 dong thi khong the gop duoc nua,
+    # nen thuat toan luon dung, va sai lech (neu con) bi khoanh trong 1 dong
+    # thay vi lan ra ca lo.
+    # Thu lai cung co lo CHI o tang dau (model khong tien dinh, doi khi thu lai
+    # la khop). Tang sau khong thu lai: chia lo moi la cach chua that, con thu
+    # lai o moi tang thi so luot goi nhan len theo CAY de quy -> do thuc te 21
+    # luot cho 1 lo 10 dong, du dot sach tran Gemini 20 request/ngay/model.
+    SO_LAN_THU_LAI_TANG_DAU = 1
+
+    @staticmethod
+    def _tach_dong(result, can):
+        """Tach ket qua thanh list dong. Uu tien cach tach cho ra dung so dong."""
+        tho = result.split("\n")
+        if len(tho) == can:
+            return tho
+        sach = [x for x in tho if x.strip()]
+        if len(sach) == can:
+            return sach
+        return tho
+
+    def _dich_khop_dong(self, it, depth=0):
+        """Dich 1 lo, dam bao tra ve DUNG len(it) dong. None = bi huy."""
+        can = len(it)
+
+        # Cache: PHAI kiem so dong. Code goc cache truoc khi kiem, nen mot ket
+        # qua gop sai bi dong bang vinh vien va tai hien y het moi lan chay.
+        cached = self._get_cache(it)
+        if cached:
+            dong = self._tach_dong(cached, can)
+            if len(dong) == can:
+                return dong
+            logger.warning(f'[1:1] bo cache sai so dong (can {can}, cache {len(dong)})')
+
+        so_lan = (self.SO_LAN_THU_LAI_TANG_DAU if depth == 0 else 0) + 1
+        for lan in range(so_lan):
+            if self._exit(): return None
+            result = cleartext(self._item_task(it))
+            dong = self._tach_dong(result, can)
+            if len(dong) == can:
+                if lan > 0:
+                    logger.info(f'[1:1] thu lai lan {lan} thi khop {can} dong')
+                self._set_cache(it, result)      # chi cache khi ket qua DUNG
+                return dong
+            logger.warning(f'[1:1] lo {can} dong nhung model tra {len(dong)} dong'
+                           f' (lan thu {lan + 1}/{so_lan}, tang {depth})')
+
+        # Het luot thu -> chia doi. Lo 1 dong khong chia duoc nua.
+        if can == 1:
+            logger.warning('[1:1] 1 dong van khong khop, danh chap nhan (sai lech'
+                           ' bi khoanh trong dung 1 dong nay)')
+            return [" ".join(x.strip() for x in dong if x.strip())]
+
+        giua = can // 2
+        logger.info(f'[1:1] chia lo {can} dong thanh {giua} + {can - giua}')
+        trai = self._dich_khop_dong(it[:giua], depth + 1)
+        if trai is None: return None
+        phai = self._dich_khop_dong(it[giua:], depth + 1)
+        if phai is None: return None
+        return trai + phai
+
     def _run_text(self, split_source_text: List[List[str]]):
         # 传统翻译渠道或AI翻译渠道以按行形式翻译
         """
@@ -102,20 +169,11 @@ class BaseTrans(BaseCon):
             """ it=['你好啊我的朋友','第二行']  此时 _item_task 接收的是 list[str] """
             if self._exit(): return
             self.signal(text=tr('starttrans') + f' {i} ')
-            result = self._get_cache(it)
-            if not result:
-                result = cleartext(self._item_task(it))
-                self._set_cache(it, result)
-            sep_res = result.split("\n")
-            for x, result_item in enumerate(sep_res):
-                if x < len(it):
-                    target_list.append(result_item.strip())
-                    self.signal(text=result_item + "\n", type='subtitle')
-            # 行数不匹配填充空行
-            if len(sep_res) < len(it):
-                logger.debug(f'行数不匹配，原始：{len(it)}, 结果：{len(sep_res)}\n{it=}\n{sep_res=}')
-                tmp = ["" for x in range(len(it) - len(sep_res))]
-                target_list += tmp
+            lines = self._dich_khop_dong(it)
+            if lines is None: return
+            for result_item in lines:
+                target_list.append(result_item.strip())
+                self.signal(text=result_item + "\n", type='subtitle')
             time.sleep(self.wait_sec)
         max_i = len(target_list)
         logger.debug(f'原始行数:{len(self.text_list)},翻译后行数:{max_i}')
