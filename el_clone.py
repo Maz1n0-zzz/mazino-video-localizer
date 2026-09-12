@@ -26,6 +26,10 @@ MIN_SEG = 0.05            # giay
 SILENCE_PER_CHAR = 0.06   # do dai im lang thay the, uoc theo so ky tu
 MIN_GAP = 0.05           # khoang ho toi thieu giua hai cau khi phai day cau sau
 MAX_TEMPO = 1.6          # nen nhanh toi da; hon nua thi giong meo, tha de tran
+# Tran nen khi chi muon cau doc gon trong O CUA CHINH NO. Thap hon MAX_TEMPO
+# nhieu vi day la truong hop thuong, tai phai khong nhan ra. 1,20 la muc PeiPei
+# Dub dat mac dinh trong o "Tran nen giong" cua ho.
+TRAN_NEN_O = 1.20
 _TS = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)")
 
 
@@ -113,6 +117,50 @@ def spoken_tags_ok(text, chars, st, et):
     return True
 
 
+def dat_cau(rendered, sr, nen=_atempo):
+    """Dat tung cau vao dung moc thoi gian cua no tren truc video.
+
+    Khong ghep sat nhau. Cau nao doc dai hon o cua no thi nen lai cho vua, tran
+    TRAN_NEN_O. Chi khi cau sau sap toi ma van chua doc xong moi duoc nen toi
+    MAX_TEMPO. `nen` tach ra lam tham so de test khoi phai goi ffmpeg.
+
+    -> (placed, blocks, n_fast, n_push, n_kich_tran)
+    """
+    blocks=[]; placed=[]; prev_end=-MIN_GAP; n_fast=0; n_push=0; n_kich_tran=0
+    for i,(c0,c1,text,aud) in enumerate(rendered):
+        d0=len(aud)/sr
+        pos=max(c0, prev_end+MIN_GAP)
+        if pos > c0+0.001: n_push+=1
+
+        # Muc tieu 1: doc xong TRONG O CUA CHINH CAU, de giong moi nam dung tren
+        # giong goc. Cach cu chi nen khi cau sau sap toi, nen cau nao co khoang
+        # lang phia sau la duoc tran thoai mai, va cai tran do day moi cau sau di
+        # muon theo day chuyen. Do tren video that 64 cue: cach cu de 21 cau tran
+        # o; them muc tieu nay va cat ngan ban dich thi con 5.
+        o_rieng = max(MIN_SEG, c1 - pos)
+        ty_le = 1.0
+        if d0 > o_rieng:
+            ty_le = min(d0/o_rieng, TRAN_NEN_O)
+            if d0/o_rieng > TRAN_NEN_O: n_kich_tran += 1
+
+        # Muc tieu 2, khan cap: cau sau sap toi ma van chua doc xong. Chi luc nay
+        # moi duoc nen toi MAX_TEMPO - giong hoi meo con hon hai cau chong nhau.
+        # Gop chung mot he so roi nen MOT lan, khong nen hai lan chong nhau.
+        nxt = rendered[i+1][0] if i+1 < len(rendered) else None
+        if nxt is not None:
+            avail = nxt - pos - MIN_GAP
+            if avail > MIN_SEG and d0/ty_le > avail:
+                ty_le = min(max(ty_le, d0/avail), MAX_TEMPO)
+
+        if ty_le > 1.001:
+            aud = nen(aud, sr, ty_le); n_fast += 1
+        d = len(aud)/sr
+        placed.append((pos, aud))
+        blocks.append(f"{i+1}\n{_sec_to_ts(pos)} --> {_sec_to_ts(pos+d)}\n{text}\n")
+        prev_end = pos + d
+    return placed, blocks, n_fast, n_push, n_kich_tran
+
+
 def main(argv=None):
     """argv=None -> doc sys.argv (chay CLI). Truyen list -> goi duoc TRONG tien
     trinh, khong can python.exe ben ngoai (ban Windows dong goi khong co)."""
@@ -162,23 +210,8 @@ def main(argv=None):
                 sr=cur; rendered.append((c0,c1,text,aud))
         print(f"[el_clone] chunk {ci}/{len(chunk_segments(segs))} xong", flush=True)
 
-    # Dat tung cau vao DUNG moc thoi gian cua no tren truc video, khong ghep sat
-    # nhau. Cau nao doc dai hon o thoi gian thi cho tran sang khoang lang ke tiep;
-    # chi nen nhanh khi cau sau sap toi ma van chua doc xong.
-    blocks=[]; placed=[]; prev_end=-MIN_GAP; n_fast=0; n_push=0
-    for i,(c0,c1,text,aud) in enumerate(rendered):
-        d=len(aud)/sr
-        pos=max(c0, prev_end+MIN_GAP)
-        if pos > c0+0.001: n_push+=1
-        nxt = rendered[i+1][0] if i+1 < len(rendered) else None
-        if nxt is not None:
-            avail = nxt - pos - MIN_GAP
-            if avail > MIN_SEG and d > avail:
-                ratio = min(d/avail, MAX_TEMPO)
-                aud = _atempo(aud, sr, ratio); d = len(aud)/sr; n_fast += 1
-        placed.append((pos, aud))
-        blocks.append(f"{i+1}\n{_sec_to_ts(pos)} --> {_sec_to_ts(pos+d)}\n{text}\n")
-        prev_end = pos + d
+    placed, blocks, n_fast, n_push, n_kich_tran = dat_cau(rendered, sr)
+    prev_end = max([p + len(a)/sr for p, a in placed], default=0.0)
 
     # Do dai track = het cau cuoi cua SRT (giu nguyen truc thoi gian video).
     end = max([prev_end] + [c1 for _c0,c1,_t,_a in rendered])
@@ -188,7 +221,8 @@ def main(argv=None):
         if n > 0: track[i0:i0+n] += aud[:n]
     if n_fast or n_push:
         print(f"[el_clone] {n_fast} cau phai nen nhanh, {n_push} cau bi day muon "
-              f"vi cau truoc chua doc xong", flush=True)
+              f"vi cau truoc chua doc xong, {n_kich_tran} cau dai qua ca tran nen "
+              f"{TRAN_NEN_O} (ban dich con dai so voi o)", flush=True)
     pk=float(np.max(np.abs(track))) if track.size else 0.0
     if pk>1.0: track=track/pk*0.98
     sf.write(a.out, track, sr)
