@@ -1196,16 +1196,52 @@ def _boc_nhay(t):
 GLOSSARY_MODEL_UU_TIEN = ("qwen2.5:7b", "qwen2.5:14b", "gemma3:12b")
 
 
+# Model DICH CHUYEN DUNG. Ban sao cua MT_MODEL_RE trong
+# videotrans/translator/_localllm.py - hai file chay o HAI tien trinh va HAI
+# venv khac nhau nen khong import cheo duoc. Sua ben nay thi sua ca ben kia.
+MT_MODEL_RE = re.compile(
+    r'(hunyuan[-_]?mt|qwen[-_]?mt|nllb|opus[-_]mt|madlad|tower[-_]?instruct|seamless)',
+    re.I)
+
+
 def _chon_model_soat(translate_type):
-    """Model de soat glossary. None = khong co gi hop -> bo qua buoc soat."""
+    """Model rieng de soat. None = dung chinh engine dang chay, KHONG phai bo qua.
+
+    Truoc day co them dieu kien `m != dang_dung` de khong dung lai model dang
+    dich. Dieu kien do vo nghia: danh sach uu tien chi chua model biet nghe
+    lenh, ma Hunyuan-MT khong bao gio nam trong do. Truong hop duy nhat no kich
+    hoat la khi qwen vua dich vua soat - luc do dung lai chinh no HOAN TOAN on,
+    vi day la hai viec khac nhau (dich ca lo vs sua mot dong theo luat). Bo di
+    de log ghi dung ten model thay vi "(engine dang dung)" mo ho.
+    """
     if translate_type != TRANS_OLLAMA:
         return None                     # Gemini: dung luon chinh no
     co = set(ollama_models())
-    dang_dung = _read_pvt_param("localllm_model", "")
     for m in GLOSSARY_MODEL_UU_TIEN:
-        if m in co and m != dang_dung:
+        if m in co:
             return m
     return None
+
+
+def _bo_qua_soat(ten_buoc, translate_type, model):
+    """Buoc soat co nen dung lai khong. Tra True = dung, va DA in ly do.
+
+    Do 12/9/2026: mot job chay 15 phut roi tut xuong Google, hai luot soat bo
+    qua ma khong in mot chu nao. Chi phat hien ra khi doc lai code. Bo qua thi
+    duoc, bo qua trong im lang thi khong.
+    """
+    if translate_type not in (TRANS_OLLAMA, TRANS_GEMINI):
+        print(f"[{ten_buoc}] BỎ QUA — engine dịch hiện tại không gọi lại được từng "
+              f"dòng. Bước này chỉ chạy với Ollama hoặc Gemini.", flush=True)
+        return True
+    if translate_type == TRANS_OLLAMA and not model:
+        dang = _read_pvt_param("localllm_model", "") or "(chưa đặt)"
+        print(f"[{ten_buoc}] BỎ QUA — máy không có model nào biết nghe lệnh. "
+              f"Model đang dịch là {dang}; model dịch chuyên dụng đã đo là KHÔNG "
+              f"sửa được lỗi theo luật (3 ca, 3 lượt mỗi ca, hỏng cả 9). "
+              f"Bật lại bằng: ollama pull qwen2.5:7b", flush=True)
+        return True
+    return False
 
 
 GLOSSARY_BAT_BUOC = (
@@ -1265,7 +1301,7 @@ def soat_glossary_srt(srt_path, source_srt, translate_type, tries=2):
     nhan khi no THAT SU co du tu con thieu va khong nuot noi dung.
     """
     st = {"soat": 0, "sua": 0, "model": ""}
-    if translate_type not in (TRANS_OLLAMA, TRANS_GEMINI):
+    if _bo_qua_soat("glossary", translate_type, _chon_model_soat(translate_type)):
         return st
     glos = _doc_glossary()
     if not glos:
@@ -1284,9 +1320,10 @@ def soat_glossary_srt(srt_path, source_srt, translate_type, tries=2):
         return st
     model = _chon_model_soat(translate_type)
     st["model"] = model or "(engine dang dung)"
-    if model:
+    if model and model != _read_pvt_param("localllm_model", ""):
         # Nha model dich TRUOC khi nap model soat: 4,6 GB + 9 GB cung luc la
-        # dung lai dung cai OOM da giet job hai lan hom 8/9.
+        # dung lai dung cai OOM da giet job hai lan hom 8/9. Trung model thi
+        # khong nha: nha xong nap lai dung thang do chi ton them thoi gian.
         ollama_unload(ly_do="để nhường chỗ cho model soát glossary")
 
     ra = []
@@ -1405,7 +1442,7 @@ def _viet_hoa_hop_le(cand, hien_tai, nguon, tran, phai_giu=()):
 def viet_hoa_srt(srt_path, source_srt, translate_type, tries=2, the_loai=None):
     """Viet lai ca file cho dung van phong tieng Viet. -> dict thong ke."""
     st = {"quet": 0, "sua": 0, "model": ""}
-    if translate_type not in (TRANS_OLLAMA, TRANS_GEMINI):
+    if _bo_qua_soat("Việt hoá", translate_type, _chon_model_soat(translate_type)):
         return st
     cues = parse_srt(srt_path)
     src = parse_srt(source_srt) if source_srt and Path(source_srt).exists() else []
@@ -1416,7 +1453,7 @@ def viet_hoa_srt(srt_path, source_srt, translate_type, tries=2, the_loai=None):
     khoi_tl = _khoi_the_loai(_the_loai_dang_chon() if the_loai is None else the_loai)
     model = _chon_model_soat(translate_type)
     st["model"] = model or "(engine dang dung)"
-    if model:
+    if model and model != _read_pvt_param("localllm_model", ""):
         ollama_unload(ly_do="để nhường chỗ cho model Việt hoá")
 
     ra = []
