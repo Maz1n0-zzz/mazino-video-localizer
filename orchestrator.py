@@ -1161,7 +1161,17 @@ def _retranslate_line(source_text, translate_type, tries=2):
 # Do tren video that (64 cue): trung vi 14,1 ky tu/giay, muc 90% la 22,2. Lay 18
 # - noi hon trung vi de con cho nhet tu bat buoc vao, nhung khong toi muc doc
 # khong kip. el_clone da bao 23 cau phai nen nhanh nen khong duoc nong hon.
-KY_TU_MOI_GIAY = 18
+# San cua tran do dai: khong bao gio doi cat qua 40% so voi cau hien tai.
+# Trung voi guard chong nuot noi dung trong _viet_hoa_hop_le (0.6 * len).
+# Truoc day cho ca len(text) vao max() nen tran LUON >= do dai hien tai -> lenh
+# "toi da N ky tu" trong prompt thanh vo nghia: cau 130 ky tu trong o 5 giay
+# duoc cap tran dung 130.
+TRAN_SAN_TI_LE = 0.6
+
+# Toc do doc thuc te cua giong long tieng, ky tu moi giay. Do tren du lieu
+# that: trung vi 14,1. Truoc day de 18 - rong hon thuc te 28% - nen ngan sach
+# do dai cau cap qua tay, cau doc khong kip o cua no roi tran sang cue sau.
+KY_TU_MOI_GIAY = 14
 
 _NHAY_DOI = (('"', '"'), ('\u201c', '\u201d'), ("'", "'"), ('\u2018', '\u2019'), ('\u00ab', '\u00bb'))
 
@@ -1335,7 +1345,7 @@ def soat_glossary_srt(srt_path, source_srt, translate_type, tries=2):
             giay = max(0.1, (end - start) / 1000)
             # Khong bao gio chat hon ban dang co: neu ban cu von da dai hon tran
             # thi it nhat cho ban moi bang no.
-            tran = int(max(40, giay * KY_TU_MOI_GIAY, len(text)))
+            tran = int(max(40, giay * KY_TU_MOI_GIAY, TRAN_SAN_TI_LE * len(text)))
             prompt = _RETRY_GLOSSARY_PROMPT.format(
                 line=nguon, terms="\n".join(f'- "{t}"' for t in thieu),
                 giay=giay, tran=tran)
@@ -1465,7 +1475,7 @@ def viet_hoa_srt(srt_path, source_srt, translate_type, tries=2, the_loai=None):
             continue
         st["quet"] += 1
         giay = max(0.1, (end - start) / 1000)
-        tran = int(max(40, giay * KY_TU_MOI_GIAY, len(text)))
+        tran = int(max(40, giay * KY_TU_MOI_GIAY, TRAN_SAN_TI_LE * len(text)))
         # Tu bat buoc DA co trong ban hien tai thi phai giu nguyen.
         phai_giu = tuple(v for k, v in glos.items()
                          if k in GLOSSARY_BAT_BUOC and v.lower() in text.lower())
