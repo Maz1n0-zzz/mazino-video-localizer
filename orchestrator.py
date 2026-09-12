@@ -1429,6 +1429,41 @@ SOURCE (Chinese): {nguon}
 CURRENT (Vietnamese): {hien_tai}"""
 
 
+# Prompt RUT GON, dung khi ung vien dung y nhung dai qua o thoi gian.
+#
+# Vi sao phai co rieng: tran do dai truoc day chi biet LOAI BO, khong biet BAT
+# CAT NGAN. Do 12/9/2026 tren 106 ung vien cua luot Viet hoa: 35 cai bi vut chi
+# vi qua dai, va cau goc dai nguyen xi duoc giu lai. Van ban cuoi cung chi ngan
+# di 2,7% -> viec bam o dom het sang buoc nen giong -> Mazino nghe ra giong moi
+# chay nhanh hon giong goc.
+#
+# Hai luot thu truoc day dung Y HET mot prompt nen luot sau khong kha hon luot
+# dau. Prompt nay noi thang cau vua roi dai bao nhieu va tran la bao nhieu.
+# LINE van phai nam CUOI CUNG - cung bai hoc voi moi prompt khac trong file.
+_RUT_GON_PROMPT = """You shorten ONE Vietnamese subtitle line. You are NOT
+translating and NOT rewriting the style: the meaning is already correct.
+
+# WHY
+This line is dubbed into a fixed {giay:.1f}s slot. Your previous answer was
+{da_dai} characters — too long. The hard limit is {tran} characters.
+
+# HOW TO SHORTEN
+Cut filler first: "thì", "là", "mà", "ấy", "đó", "một chút", "rồi đấy".
+Drop repeated words. Use the shorter synonym. Keep every fact and every name.
+
+# HARD RULES
+- Output ONLY the shortened Vietnamese line. One line. Nothing else.
+- At most {tran} characters.
+- No quotes, no brackets, no tags, no explanation, no alternatives.
+- ZERO Chinese/Japanese/Korean characters.
+- Never drop information to hit the limit — cut words, not facts.
+
+# WORDS YOU MUST KEEP EXACTLY
+{giu}
+
+LINE: {line}"""
+
+
 def _viet_hoa_hop_le(cand, hien_tai, nguon, tran, phai_giu=()):
     """Ban viet lai co dung duoc khong. Chan moi kieu hong da gap."""
     if not cand or CJK_RE.search(cand):
@@ -1446,7 +1481,24 @@ def _viet_hoa_hop_le(cand, hien_tai, nguon, tran, phai_giu=()):
     # Nuot noi dung: cau dai ma bi rut qua nua thi gan nhu chac chan mat y.
     if len(hien_tai) >= 40 and len(cand) < 0.6 * len(hien_tai):
         return False
+    # Cat SAU HON muc can: tran doi 65 ky tu ma model tra ve 42 thi no khong
+    # cat chu thua, no cat mat noi dung. Do 12/9/2026: 3 cau kieu nay, deu mat
+    # that - "Ban nen mua it hon" bien mat, "trong mot giay" bien mat. Chi ap
+    # khi DANG o che do rut gon (tran nho hon cau hien tai).
+    if tran < len(hien_tai) and len(cand) < 0.8 * tran:
+        return False
     return _candidate_ok(cand, nguon)
+
+
+def _chi_loi_do_dai(cand, hien_tai, nguon, tran, phai_giu=()):
+    """Ung vien chi hong DUY NHAT o cho qua dai -> dang de rut gon, dung vut.
+
+    Goi lai chinh _viet_hoa_hop_le nhung tha tran do dai ra, de moi luat khac
+    (chu Han, tu bat buoc, nuot noi dung, dinh chu) van duoc kiem y nguyen.
+    """
+    if not cand or len(cand) <= tran:
+        return False
+    return _viet_hoa_hop_le(cand, hien_tai, nguon, len(cand), phai_giu)
 
 
 def viet_hoa_srt(srt_path, source_srt, translate_type, tries=2, the_loai=None):
@@ -1479,15 +1531,21 @@ def viet_hoa_srt(srt_path, source_srt, translate_type, tries=2, the_loai=None):
         # Tu bat buoc DA co trong ban hien tai thi phai giu nguyen.
         phai_giu = tuple(v for k, v in glos.items()
                          if k in GLOSSARY_BAT_BUOC and v.lower() in text.lower())
+        giu_txt = ("\n".join(f'- "{t}"' for t in phai_giu) if phai_giu
+                   else "(khong co tu nao bat buoc)")
         prompt = _VIET_HOA_PROMPT.format(
             luat=VI_PROMPT_RULES.strip(), tran=tran, giay=giay, the_loai=khoi_tl,
             ngu_canh="\n".join(da_sua[-VIET_HOA_NGU_CANH:]) or "(chua co cau nao)",
-            giu=("\n".join(f'- "{t}"' for t in phai_giu) if phai_giu
-                 else "(khong co tu nao bat buoc)"),
-            nguon=nguon, hien_tai=text)
+            giu=giu_txt, nguon=nguon, hien_tai=text)
         moi = ""
+        qua_dai = ""      # ung vien dat moi dieu kien TRU do dai -> de rut gon
         for _ in range(max(1, tries)):
-            out = _llm_once(prompt, translate_type, model=model)
+            # Co ung vien dung y ma dai qua thi luot sau chuyen sang viec RUT
+            # GON no, thay vi hoi lai y het cau cu va nhan ve y het ket qua cu.
+            p = (_RUT_GON_PROMPT.format(giay=giay, tran=tran, da_dai=len(qua_dai),
+                                        giu=giu_txt, line=qua_dai)
+                 if qua_dai else prompt)
+            out = _llm_once(p, translate_type, model=model)
             if not out or not out.strip():
                 continue
             c = _boc_nhay(_cut_alternatives(
@@ -1495,6 +1553,12 @@ def viet_hoa_srt(srt_path, source_srt, translate_type, tries=2, the_loai=None):
             if _viet_hoa_hop_le(c, text, nguon, tran, phai_giu):
                 moi = c
                 break
+            if _chi_loi_do_dai(c, text, nguon, tran, phai_giu):
+                qua_dai = c
+        # Het luot ma van dai: van con hon cau cu neu no NGAN HON cau cu. Cau cu
+        # dang vuot ngan sach thi moi ky tu cat bot deu bot mot chut nen giong.
+        if not moi and qua_dai and len(qua_dai) < len(text):
+            moi = qua_dai
         if moi and moi != text:
             text = moi
             st["sua"] += 1
