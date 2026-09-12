@@ -937,6 +937,21 @@ def _co_chu_dinh(text):
     return bool(re.search(r'[.,;:!?]["\')\]]?[A-ZĐÀ-Ỹ]', text))
 
 
+# Am tiet tieng Viet dai nhat la 7 chu ("nghiêng"). Mot tu tu 8 chu lien nhau
+# tro len la dau hieu hai am tiet bi dinh vao nhau hoac chu bi hong.
+# Do 12/9/2026: buoc rut gon tra ve "...trong giâyiect" - "giay" bi dinh them
+# rac. Chu thuong het nen guard dinh-chu-hoa khong bat duoc.
+# Do tren 403 dong phu de that: bao dung 2 dong, 1 la loi that, 1 la tieng cuoi
+# "hahahaha" -> loai tru rieng tieng cuoi bang mau lap 2 ky tu.
+_TU_DAI_RE = re.compile(r'[^\W\d_]{8,}', re.UNICODE)
+_TIENG_CUOI_RE = re.compile(r'^(..)\1{2,}$', re.UNICODE)
+
+
+def _co_tu_dinh_nhau(text):
+    """Co tu dai bat thuong (hai am tiet dinh nhau / chu hong) khong."""
+    return any(not _TIENG_CUOI_RE.match(w) for w in _TU_DAI_RE.findall(text))
+
+
 def _candidate_ok(cand, ask):
     """Ban dich lai chi dung duoc khi khong nuot mat noi dung.
 
@@ -947,7 +962,7 @@ def _candidate_ok(cand, ask):
     """
     if not cand:
         return False
-    if _co_chu_dinh(cand):
+    if _co_chu_dinh(cand) or _co_tu_dinh_nhau(cand):
         return False
     return not (len(ask) >= 40 and len(cand) < 0.6 * len(ask))
 
