@@ -27,9 +27,12 @@ SILENCE_PER_CHAR = 0.06   # do dai im lang thay the, uoc theo so ky tu
 MIN_GAP = 0.05           # khoang ho toi thieu giua hai cau khi phai day cau sau
 MAX_TEMPO = 1.6          # nen nhanh toi da; hon nua thi giong meo, tha de tran
 # Tran nen khi chi muon cau doc gon trong O CUA CHINH NO. Thap hon MAX_TEMPO
-# nhieu vi day la truong hop thuong, tai phai khong nhan ra. 1,20 la muc PeiPei
-# Dub dat mac dinh trong o "Tran nen giong" cua ho.
-TRAN_NEN_O = 1.20
+# nhieu vi day la truong hop thuong, tai phai khong nhan ra.
+# 1,20 la muc PeiPei Dub dat mac dinh. Da thu 1,20 tren video that 12/9/2026:
+# Mazino nghe ra ngay "voice moi chay nhanh hon voice goc". Ha ve 1,10.
+# Doi lai vai cau se tran sang khoang lang phia sau - chap nhan duoc, vi buoc
+# rut gon ban dich (_RUT_GON_PROMPT) lo phan con lai.
+TRAN_NEN_O = 1.10
 _TS = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)")
 
 
