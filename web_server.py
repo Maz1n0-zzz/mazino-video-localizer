@@ -316,6 +316,19 @@ def _translation_plan(trans_engine):
     return [(TRANS_GOOGLE, None)]
 
 
+def _canh_bao_khong_co_model_soat(job_id, trans_engine):
+    """Nói trước nếu hai lượt soát sau khi dịch sẽ không chạy được."""
+    if trans_engine == TRANS_GEMINI:
+        return                                  # Gemini tự soát bằng chính nó
+    if trans_engine != TRANS_OLLAMA:
+        _log(job_id, "    ⚠ Engine này không gọi lại được từng dòng — sẽ KHÔNG có "
+                     "bước soát glossary và Việt hoá. Chọn Ollama hoặc Gemini nếu cần.")
+        return
+    if not any(m in set(orch.ollama_models()) for m in orch.GLOSSARY_MODEL_UU_TIEN):
+        _log(job_id, "    ⚠ Máy không có model nào biết nghe lệnh — sẽ KHÔNG có bước "
+                     "soát glossary và Việt hoá. Mở Terminal gõ: ollama pull qwen2.5:7b")
+
+
 def _translate_with_fallback(job_id, input_video, work_dir, source_lang, target_lang,
                              model_name, pvt_voice, asr_engine, trans_engine):
     plan = _translation_plan(trans_engine)
@@ -388,6 +401,10 @@ def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_ro
             # Chỉ kênh LLM mới đọc prompt/glossary; Google bỏ qua hoàn toàn.
             orch.install_vi_translation_assets()
         _log(job_id, f"    → Dịch bằng: {dict(trans_choices()).get(trans_engine, trans_engine)}")
+        # Báo NGAY, đừng để chạy xong 15 phút mới biết hai lượt soát không chạy.
+        # Đo 12/9: một job tụt xuống Google, hai lượt soát bỏ qua trong im lặng,
+        # chỉ phát hiện khi đọc lại code.
+        _canh_bao_khong_co_model_soat(job_id, trans_engine)
         _log(job_id, f"[2/4] Đang transcribe + dịch + dub bằng {asr_note}... "
                       "(lần đầu chạy 1 model mới sẽ mất thêm thời gian tải model)")
         # Ở chế độ clone, pyvideotrans vẫn phải dub Edge-TTS (ta sẽ thay bằng F5
