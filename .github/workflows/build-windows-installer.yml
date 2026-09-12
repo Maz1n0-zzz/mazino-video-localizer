@@ -84,7 +84,7 @@ jobs:
       - name: Assemble staging directory
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist_stage\web_server, dist_stage\pyvideotrans, dist_stage\vsr, dist_stage\ffmpeg, dist_stage\pvt_models | Out-Null
+          New-Item -ItemType Directory -Force -Path dist_stage\web_server, dist_stage\pyvideotrans, dist_stage\vsr, dist_stage\ffmpeg | Out-Null
           Copy-Item dist_stage_raw\web_server\* dist_stage\web_server -Recurse -Force
           Copy-Item dist_stage_raw\pyvideotrans_cli\* dist_stage\pyvideotrans -Recurse -Force
           Copy-Item dist_stage_raw\vsr_cli\* dist_stage\vsr -Recurse -Force
@@ -123,31 +123,6 @@ jobs:
           $probe = Get-ChildItem -Path ffmpeg_extract -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
           Copy-Item $probe.FullName dist_stage\ffmpeg\ffprobe.exe
 
-      # ---------- tải sẵn model whisper "medium" (offline bundling) ----------
-      # pyvideotrans doc model.bin/config.json truc tiep tu
-      # <ROOT>/models/models--<org>--<name>/ (khong co tang snapshots/blobs) -
-      # xem videotrans/util/help_down.py: sau khi snapshot_download(local_dir=..)
-      # xong, no tu xoa het cac thu muc cache blobs/refs/snapshots/.cache/
-      # .no_exist, chi giu file thuc su nam thang trong local_dir. Lan build
-      # truoc dung HF_HUB_CACHE (kieu cache mac dinh, model.bin chi la symlink
-      # trong snapshots/<hash>/, file thuc nam trong blobs/) khong khop cau
-      # truc nay -> RuntimeError "Unable to open file 'model.bin'" khi chay
-      # thuc te tren Windows. Sua lai dung y nhu pyvideotrans tu lam.
-      - name: Pre-download faster-whisper medium model
-        shell: pwsh
-        run: |
-          $localDir = "dist_stage\pvt_models\models--Systran--faster-whisper-medium"
-          New-Item -ItemType Directory -Force -Path $localDir | Out-Null
-          web_env\Scripts\python.exe -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Systran/faster-whisper-medium', local_dir=r'$localDir', local_dir_use_symlinks=False)"
-          foreach ($junk in @('blobs', 'refs', 'snapshots', '.cache', '.no_exist')) {
-            $p = Join-Path $localDir $junk
-            if (Test-Path $p) { Remove-Item -Recurse -Force $p }
-          }
-          $modelBin = Join-Path $localDir "model.bin"
-          if (-not (Test-Path $modelBin) -or (Get-Item $modelBin).Length -eq 0) {
-            throw "model.bin thieu hoac rong sau khi tai + don rac tai $modelBin"
-          }
-
       # ---------- gộp thành setup.exe bằng Inno Setup ----------
       # KHÔNG dùng action Minionguyjpro/Inno-Setup-Action — bug thật trong
       # wrapper Node.js của action đó (TypeError ERR_INVALID_ARG_TYPE khi
@@ -166,12 +141,22 @@ jobs:
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /Q "installer\setup.iss" "/DStageDir=${{ github.workspace }}\dist_stage"
           if ($LASTEXITCODE -ne 0) { throw "ISCC.exe exited with code $LASTEXITCODE" }
 
-      # KHONG dung GitHub Release cho installer nay: da thu (xem log run
-      # 31453629544) va bi HTTP 422 "size must be less than 2147483648" -
-      # Release gioi han cung 2GB/file, con installer ~4GB (bundle ca model AI
-      # + ffmpeg + 2 engine) vuot gioi han nay. Actions Artifact khong co gioi
-      # han nay nen day la cach duy nhat dung duoc cho file lon co nay, du toc
-      # do tai cham hon Release.
+      # Tran 2147483648 byte (2 GiB) moi file cua GitHub Release la CUNG: da an
+      # HTTP 422 "size must be less than 2147483648" o log run 31453629544 hoi
+      # installer con ~4GB, va lan 12/9/2026 ban 2802 MB cung khong gan len
+      # release duoc. Sau khi bo model whisper medium (1460 MB) ban cai con
+      # ~1400 MB nen gan duoc. Chot lai o day de lan sau phinh qua tran thi CI
+      # do ngay, thay vi phat hien luc dang tai len.
+      - name: Fail if installer exceeds GitHub Release limit
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist_installer\*.exe | Select-Object -First 1
+          $mb = [math]::Round($exe.Length / 1MB)
+          Write-Host "$($exe.Name): $mb MB"
+          if ($exe.Length -ge 2147483648) {
+            throw "$($exe.Name) nang $mb MB, vuot tran 2048 MiB moi file cua GitHub Release"
+          }
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:

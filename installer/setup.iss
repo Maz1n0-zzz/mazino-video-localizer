@@ -12,7 +12,7 @@
 ;     pyvideotrans/         <- toàn bộ nội dung dist/pyvideotrans_cli (từ pyvideotrans_cli.spec)
 ;     vsr/                   <- toàn bộ nội dung dist/vsr_cli (từ vsr_cli.spec)
 ;     ffmpeg/ffmpeg.exe, ffprobe.exe   <- ffmpeg tĩnh có libass (dùng chung, orchestrator.py gọi trực tiếp)
-;     pvt_models/models--Systran--faster-whisper-medium/...   <- model whisper đã tải sẵn (offline)
+;     (KHÔNG còn pvt_models/ — xem [Dirs] bên dưới: model whisper tải lúc dùng)
 ;
 ; Layout cài đặt cuối (khớp orchestrator.py FROZEN branch, xem comment trong
 ; orchestrator.py): web_server.exe PHẢI nằm ở {app} top-level, các exe con
@@ -63,10 +63,15 @@ Source: "{#StageDir}\vsr\*"; DestDir: "{app}\vsr"; Flags: recursesubdirs createa
 ; bản tĩnh có libass, KHÁC với ffmpeg riêng của vsr (chỉ dùng để transcode)
 Source: "{#StageDir}\ffmpeg\*"; DestDir: "{app}\ffmpeg"; Flags: recursesubdirs createallsubdirs ignoreversion
 
-; Model whisper "medium" tải sẵn — đặt vào đúng cache dir mà faster-whisper/
-; huggingface_hub kỳ vọng, dưới pyvideotrans/models/ (ROOT_DIR khi FROZEN =
-; thư mục chứa pyvideotrans_cli.exe, xem videotrans/configure/_paths.py)
-Source: "{#StageDir}\pvt_models\*"; DestDir: "{app}\pyvideotrans\models"; Flags: recursesubdirs createallsubdirs ignoreversion
+[Dirs]
+; Chỗ để model whisper, KHÔNG kèm model nào sẵn. Model medium nặng 1460 MB,
+; kèm vào thì setup.exe lên 2802 MB, vượt trần 2147 MB mỗi file của GitHub
+; release nên không phát hành được. faster-whisper/huggingface_hub kỳ vọng
+; đúng thư mục này (ROOT_DIR khi FROZEN = thư mục chứa pyvideotrans_cli.exe,
+; xem videotrans/configure/_paths.py) và tự tải vào đây lần đầu cần tới.
+; Đường tiếng Trung của Mazino dùng FireRedASR, cũng tự tải model riêng lần
+; đầu, nên bản cài này chưa bao giờ là offline tuyệt đối ngay sau khi cài.
+Name: "{app}\pyvideotrans\models"
 
 [Icons]
 Name: "{group}\Mazino Video Localizer"; Filename: "{app}\web_server.exe"; WorkingDir: "{app}"
