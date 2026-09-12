@@ -446,7 +446,9 @@ def _run_job(job_id, input_video, source_lang, target_lang, model_name, voice_ro
             _log(job_id, "    ✓ Xong giọng clone")
         elif tts_engine == "elevenlabs" and el:
             _log(job_id, "    → Đang tạo giọng ElevenLabs (gọi 1 lần cả bài, chống lệch ngữ điệu)...")
-            dub_audio, el_srt = orch.synthesize_elevenlabs_dub(dub_srt, el[0], el[1], el[2], work_dir)
+            dub_audio, el_srt = orch.synthesize_elevenlabs_dub(
+                dub_srt, el[0], el[1], el[2], work_dir,
+                goc_video=input_video, srt_goc=raw_srt)
             if el_srt:
                 ass_srt = el_srt
             stretch_video = True

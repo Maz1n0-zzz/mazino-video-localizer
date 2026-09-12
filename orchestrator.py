@@ -434,7 +434,8 @@ def remove_old_subtitles(input_video, work_dir, inpaint_mode="sttn-auto", sub_ar
 EL_CLONE_SCRIPT = PROJECT_ROOT / "el_clone.py"
 
 
-def synthesize_elevenlabs_dub(dub_srt, api_key, voice_id, model, work_dir, speed=1.0):
+def synthesize_elevenlabs_dub(dub_srt, api_key, voice_id, model, work_dir, speed=1.0,
+                              goc_video=None, srt_goc=None):
     """Dub bằng ElevenLabs GỌI 1 LẦN /with-timestamps cho cả bài rồi cắt theo
     alignment -> KHÔNG lệch ngữ điệu. Chạy el_clone.py trong venv pyvideotrans
     (có elevenlabs/numpy/soundfile). Trả (wav, srt). Xem HANDOFF.md."""
@@ -444,6 +445,13 @@ def synthesize_elevenlabs_dub(dub_srt, api_key, voice_id, model, work_dir, speed
     args = ["--srt", str(dub_srt), "--out", str(out_wav), "--out-srt", str(out_srt),
             "--api-key", api_key, "--voice-id", voice_id,
             "--model", model, "--speed", str(speed)]
+    # Ban goc de el_clone do doan THAT SU co tieng trong tung o, thay vi neo mu
+    # vao dau o (bien o cua TEN VAD khong phai bien tieng noi). Thieu file thi
+    # el_clone tu quay ve cach cu, khong hong job.
+    if goc_video and Path(goc_video).exists():
+        args += ["--goc", str(goc_video)]
+    if srt_goc and Path(srt_goc).exists():
+        args += ["--srt-goc", str(srt_goc)]
     print(f"[run] el_clone (voice={voice_id} model={model})")
 
     if FROZEN:

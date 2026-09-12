@@ -33,6 +33,25 @@ MAX_TEMPO = 1.6          # nen nhanh toi da; hon nua thi giong meo, tha de tran
 # Doi lai vai cau se tran sang khoang lang phia sau - chap nhan duoc, vi buoc
 # rut gon ban dich (_RUT_GON_PROMPT) lo phan con lai.
 TRAN_NEN_O = 1.10
+
+# --- Do 12/9/2026 tren video that (64 cue, 295s) ---
+# Bien o cua TEN VAD KHONG phai bien tieng noi: no ep moi doan dai toi thieu
+# 1000ms bang cach nuot doan ngan ben canh (videotrans/process/vad.py:185
+# `seg[0] = prev[0]`), roi chan tren o 5s. Ket qua 44/64 cue dai >=4s va 96%
+# thoi luong video nam trong mot o nao do. Giong Viet neo vao DAU O nen doc
+# xong som: 29 cue thua >0,8s, cong lai 73,5s chet. Mazino nghe ra la "voice
+# moi khong de dung thoi diem voice goc".
+# Cach chua: do nang luong ban GOC trong tung o de tim doan THAT SU co tieng,
+# roi dat cau tieng Viet vao doan do.
+KHUNG_FRAME_MS = 20           # do dai 1 khung khi do nang luong
+KHUNG_MIN_RUN_MS = 100        # phai keu lien tuc chung nay moi tinh la tieng noi
+KHUNG_TUONG_PHAN_DB = 8.0     # nen/dinh chenh duoi muc nay -> khong du tin, bo qua
+KHUNG_MIN_DICH = 0.15         # dich duoi muc nay thi thoi, tranh rung vat
+KHUNG_MIN_SPAN = 0.20         # cua so ngan hon muc nay -> khong tin
+# Cue nguon CHI co tieng cuoi thi khong long tieng: chen "Ha ha ha" tieng Viet
+# dai 0,4s vao o 7,5s chi tao them 7,1s im lang, trong khi tieng cuoi goc van
+# con trong nen (original_volume_pct) va nghe tu nhien hon.
+_CUOI_RE = re.compile(r"^[\u54c8\u563f\u5475\u563b]{2,}$")
 _TS = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)")
 
 
@@ -120,27 +139,135 @@ def spoken_tags_ok(text, chars, st, et):
     return True
 
 
-def dat_cau(rendered, sr, nen=_atempo):
+def chi_tieng_cuoi(text_goc):
+    """True khi cue NGUON chi gom tieng cuoi (哈哈, 嘿嘿...). Cue nhu vay bo qua,
+    khong long tieng. Chi nhan dien tren ban goc: ban dich da thanh "Ha ha ha"
+    nen khong con phan biet duoc voi loi thoai that."""
+    if not text_goc:
+        return False
+    loi = re.sub(r"[\s\W_]+", "", text_goc, flags=re.UNICODE)
+    return bool(_CUOI_RE.match(loi))
+
+
+def doc_mono(path, sr_dich=16000):
+    """Rut audio 1 kenh tu video hoac wav bat ky -> (mang float32, sample rate).
+
+    16kHz la du: ta chi do NANG LUONG theo khung 20ms, khong nhan dang gi.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        w = Path(td) / "g.wav"
+        subprocess.run(["ffmpeg", "-y", "-i", str(path), "-vn", "-ac", "1",
+                        "-ar", str(sr_dich), str(w)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        x, sr = sf.read(str(w), dtype="float32")
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+    return x, sr
+
+
+def khung_mot_cue(x, sr, c0, c1):
+    """Tim doan THAT SU co tieng noi ben trong o [c0,c1] cua ban goc.
+
+    -> (s0, s1) tuyet doi tren truc video, hoac None khi khong du tuong phan de
+    tin (nhac nen to, tieng on deu). None nghia la "giu nguyen o cu", khong phai
+    "khong co tieng": tha khong dich con hon dich sai cho.
+    """
+    i0 = max(0, int(c0 * sr)); i1 = min(len(x), int(c1 * sr))
+    if i1 - i0 < int(0.2 * sr):
+        return None
+    n = max(1, int(sr * KHUNG_FRAME_MS / 1000))
+    m = (i1 - i0) // n
+    if m < 5:
+        return None
+    r = x[i0:i0 + m * n].reshape(m, n)
+    db = 20.0 * np.log10(np.sqrt((r * r).mean(axis=1)) + 1e-9)
+    nen = float(np.percentile(db, 20)); dinh = float(np.percentile(db, 95))
+    if dinh - nen < KHUNG_TUONG_PHAN_DB:
+        return None
+    to = db > (nen + 0.5 * (dinh - nen))
+
+    # Chi tinh la tieng noi khi keu lien tuc >= KHUNG_MIN_RUN_MS, de tieng go
+    # hay tieng dong 1 khung khong keo cua so rong ra vo ich.
+    can = max(1, int(KHUNG_MIN_RUN_MS / KHUNG_FRAME_MS))
+    dau = cuoi = None; chay = None
+    for k in range(m + 1):
+        if k < m and to[k]:
+            if chay is None:
+                chay = k
+            continue
+        if chay is not None and k - chay >= can:
+            if dau is None:
+                dau = chay
+            cuoi = k
+        chay = None
+    if dau is None:
+        return None
+
+    s0 = c0 + dau * n / sr
+    s1 = min(c1, c0 + cuoi * n / sr)
+    if s1 - s0 < KHUNG_MIN_SPAN:
+        return None
+    if s0 - c0 < KHUNG_MIN_DICH:
+        s0 = c0
+    return (s0, s1)
+
+
+def khung_tieng_noi(goc_path, segs):
+    """-> list cung do dai segs, moi phan tu la (s0,s1) hoac None.
+
+    Loi doc/giai ma khong duoc giet job: tra toan None de dat_cau chay y het
+    truoc day.
+    """
+    try:
+        x, sr = doc_mono(goc_path)
+    except Exception as e:
+        print(f"[el_clone] CANH BAO: khong doc duoc audio goc ({e}) -> "
+              f"dat cau theo dau o nhu cu", flush=True)
+        return [None] * len(segs)
+    return [khung_mot_cue(x, sr, c0, c1) for c0, c1, _t in segs]
+
+
+def dat_cau(rendered, sr, nen=_atempo, khung=None):
     """Dat tung cau vao dung moc thoi gian cua no tren truc video.
 
     Khong ghep sat nhau. Cau nao doc dai hon o cua no thi nen lai cho vua, tran
     TRAN_NEN_O. Chi khi cau sau sap toi ma van chua doc xong moi duoc nen toi
     MAX_TEMPO. `nen` tach ra lam tham so de test khoi phai goi ffmpeg.
 
-    -> (placed, blocks, n_fast, n_push, n_kich_tran)
+    `khung[i]` = (s0,s1) doan THAT SU co tieng trong o thu i cua ban goc, do bang
+    khung_tieng_noi(). None hoac khong truyen -> dung ca o, tuc y het hanh vi cu.
+
+    -> (placed, blocks, n_fast, n_push, n_kich_tran, n_dich, tong_dich)
     """
     blocks=[]; placed=[]; prev_end=-MIN_GAP; n_fast=0; n_push=0; n_kich_tran=0
+    n_dich=0; tong_dich=0.0
     for i,(c0,c1,text,aud) in enumerate(rendered):
         d0=len(aud)/sr
-        pos=max(c0, prev_end+MIN_GAP)
-        if pos > c0+0.001: n_push+=1
+        # Chi can chinh khi DO DUOC doan co tieng. Do that bai nghia la nhac nen
+        # to hoac on deu: luc do khong biet gi hon dau o, va doan giua o la danh
+        # bac. Giu nguyen cach cu.
+        k = khung[i] if khung else None
+        if k:
+            s0, s1 = k
+            # Cau ngan hon doan co tieng -> dat vao GIUA doan do, sai so chia deu
+            # hai dau thay vi don het ve cuoi. Cau dai hon -> bat dau ngay dau.
+            span = max(MIN_SEG, s1-s0)
+            moc = s0 if d0 >= span else s0 + (span-d0)/2
+        else:
+            moc = c0
+        pos=max(moc, prev_end+MIN_GAP)
+        if pos > moc+0.001: n_push+=1
+        if moc > c0+0.001: n_dich+=1; tong_dich += moc-c0
 
         # Muc tieu 1: doc xong TRONG O CUA CHINH CAU, de giong moi nam dung tren
         # giong goc. Cach cu chi nen khi cau sau sap toi, nen cau nao co khoang
         # lang phia sau la duoc tran thoai mai, va cai tran do day moi cau sau di
         # muon theo day chuyen. Do tren video that 64 cue: cach cu de 21 cau tran
         # o; them muc tieu nay va cat ngan ban dich thi con 5.
-        o_rieng = max(MIN_SEG, c1 - pos)
+        # Do phong theo vi tri CU (dau o), khong theo vi tri da dich: dich cau
+        # muon hon la vi tieng goc bat dau muon, khong phai ly do de nen gat hon.
+        # Tran ra sau c1 dung bang phan da dich - do la khoang lang trong ban goc.
+        o_rieng = max(MIN_SEG, c1 - max(c0, prev_end + MIN_GAP))
         ty_le = 1.0
         if d0 > o_rieng:
             ty_le = min(d0/o_rieng, TRAN_NEN_O)
@@ -161,7 +288,7 @@ def dat_cau(rendered, sr, nen=_atempo):
         placed.append((pos, aud))
         blocks.append(f"{i+1}\n{_sec_to_ts(pos)} --> {_sec_to_ts(pos+d)}\n{text}\n")
         prev_end = pos + d
-    return placed, blocks, n_fast, n_push, n_kich_tran
+    return placed, blocks, n_fast, n_push, n_kich_tran, n_dich, tong_dich
 
 
 def main(argv=None):
@@ -172,10 +299,24 @@ def main(argv=None):
     ap.add_argument("--out-srt", default="")
     ap.add_argument("--model", default="eleven_v3")
     ap.add_argument("--speed", type=float, default=1.0)
+    # Hai co nay deu KHONG bat buoc: thieu thi chay y het ban cu.
+    ap.add_argument("--goc", default="", help="video/audio GOC de do doan co tieng noi")
+    ap.add_argument("--srt-goc", default="", help="srt ngon ngu nguon, de bo qua cue chi co tieng cuoi")
     a=ap.parse_args(argv)
 
     segs=parse_srt(Path(a.srt))
     if not segs: sys.exit("[el_clone] srt rong")
+
+    srt_goc=getattr(a,"srt_goc")
+    if srt_goc and Path(srt_goc).exists():
+        # Khop theo moc bat dau (ms): pyvideotrans giu nguyen timing khi dich.
+        goc={int(round(t0*1000)): t for t0,_t1,t in parse_srt(Path(srt_goc))}
+        truoc=len(segs)
+        segs=[x for x in segs if not chi_tieng_cuoi(goc.get(int(round(x[0]*1000)),""))]
+        if len(segs) < truoc:
+            print(f"[el_clone] bo qua {truoc-len(segs)} cue chi co tieng cuoi "
+                  f"-> giu tieng cuoi goc", flush=True)
+    if not segs: sys.exit("[el_clone] srt rong sau khi loc")
     api_key=getattr(a,"api_key"); voice_id=getattr(a,"voice_id")
 
     sr=None; rendered=[]  # (text, np_audio)
@@ -213,7 +354,14 @@ def main(argv=None):
                 sr=cur; rendered.append((c0,c1,text,aud))
         print(f"[el_clone] chunk {ci}/{len(chunk_segments(segs))} xong", flush=True)
 
-    placed, blocks, n_fast, n_push, n_kich_tran = dat_cau(rendered, sr)
+    khung = khung_tieng_noi(a.goc, [(c0,c1,t) for c0,c1,t,_a in rendered]) if a.goc else None
+    placed, blocks, n_fast, n_push, n_kich_tran, n_dich, tong_dich = dat_cau(
+        rendered, sr, khung=khung)
+    if khung:
+        do = sum(1 for k in khung if k)
+        print(f"[el_clone] do duoc doan co tieng o {do}/{len(khung)} cue; "
+              f"{n_dich} cau dich muon hon dau o, trung binh "
+              f"{(tong_dich/n_dich if n_dich else 0):.2f}s", flush=True)
     prev_end = max([p + len(a)/sr for p, a in placed], default=0.0)
 
     # Do dai track = het cau cuoi cua SRT (giu nguyen truc thoi gian video).
